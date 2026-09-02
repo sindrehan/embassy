@@ -21,6 +21,20 @@ uses `ClockConfig::pll` with the board's 12 MHz crystal: PLL at 144 MHz, 72 MHz
 core, 24 MHz bus and flash. Both print the resulting clocks and a busy-loop
 benchmark, which runs about 3.4 times faster on the PLL (72 over 21 MHz).
 
+## Serial
+
+`serial` echoes on LPUART0 (PTB17 TX, PTB16 RX, 115200 8N1), which the board
+routes to the OpenSDA virtual COM port and to Arduino D1/D0. The J-Link OpenSDA
+firmware enumerates a CDC ACM interface; on Linux it only shows up as
+`/dev/ttyACM0` after `sudo modprobe cdc_acm`. For an external 3.3 V adapter
+use LPUART1 on PTC4 (TX, Arduino D10 / J2 pin 6) and PTC3 (RX, Arduino D6 /
+J1 pin 14) instead; the example says which two lines to change.
+
+`lpuart_loopback` needs no wiring: it puts LPUART0 in internal loopback and
+checks 64 bytes through the async API at 115200 and the blocking API at 9600,
+then exits. LPUART2 has no NVIC vector of its own (it sits behind INTMUX0), so
+it is blocking only.
+
 ## Chip quirks handled here
 
 - **Flash configuration field at 0x400..0x40F.** `memory.x` places the
