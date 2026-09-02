@@ -12,6 +12,7 @@ build = [
     {target = "thumbv8m.main-none-eabihf", features = ["defmt", "lpc55s16"]},
     {target = "thumbv7em-none-eabihf", features = ["defmt", "mimxrt1011", "rt", "time-driver-pit"]},
     {target = "thumbv7em-none-eabihf", features = ["defmt", "mimxrt1062", "rt", "time-driver-pit"]},
+    {target = "thumbv6m-none-eabi", features = ["defmt", "mkl82z7", "rt"]},
 ]
 
 [package.metadata.embassy_docs]
@@ -23,6 +24,7 @@ flavors = [
     { regex_feature = "lpc55-core0", target = "thumbv8m.main-none-eabihf" },
     { regex_feature = "lpc55s16", target = "thumbv8m.main-none-eabihf" },
     { regex_feature = "mimxrt.*", target = "thumbv7em-none-eabihf" },
+    { regex_feature = "mkl82z7", target = "thumbv6m-none-eabi" },
 ]
 
 [dependencies]
@@ -40,13 +42,16 @@ embassy-time-queue-utils = { version = "0.3.2", path = "../embassy-time-queue-ut
 embedded-io = { version = "0.7.1" }
 embedded-hal-02 = { package = "embedded-hal", version = "0.2.6", features = ["unproven"] }
 ## Chip dependencies
-nxp-pac = { version = "0.1.0", optional = true, git = "https://github.com/embassy-rs/nxp-pac", rev = "59cc45767cc48a4285270c95fecccd447f143030" }
+# TODO: switch back to the embassy-rs/nxp-pac git dependency once the mkl82z7
+# feature and metadata are upstream. Until then this points at a local checkout of
+# https://github.com/sindrehan/nxp-pac, branch `mkl82z7`.
+nxp-pac = { version = "0.1.0", optional = true, path = "../../nxp-pac/nxp-pac" }
 
 imxrt-rt = { version = "0.1.7", optional = true, features = ["device"] }
 
 [build-dependencies]
 cfg_aliases = "0.2.1"
-nxp-pac = { version = "0.1.0", git = "https://github.com/embassy-rs/nxp-pac", rev = "59cc45767cc48a4285270c95fecccd447f143030", default-features = false, features = ["metadata"] }
+nxp-pac = { version = "0.1.0", path = "../../nxp-pac/nxp-pac", default-features = false, features = ["metadata"] }
 proc-macro2 = "1.0.95"
 quote = "1.0.15"
 
@@ -78,6 +83,7 @@ unstable-pac = []
 # that creates the aliases.
 _rt1xxx = []
 _lpc55 = []
+_kinetis = []
 
 # A timer driver is enabled.
 _time_driver = ["dep:embassy-time-driver", "dep:embassy-time-queue-utils"]
@@ -87,3 +93,4 @@ lpc55-core0 = ["nxp-pac/lpc55s69_cm33_core0", "_lpc55"]
 lpc55s16 = ["nxp-pac/lpc55s16", "_lpc55"]
 mimxrt1011 = ["nxp-pac/mimxrt1011", "_rt1xxx", "dep:imxrt-rt"]
 mimxrt1062 = ["nxp-pac/mimxrt1062", "_rt1xxx", "dep:imxrt-rt"]
+mkl82z7 = ["nxp-pac/mkl82z7", "_kinetis"]

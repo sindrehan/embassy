@@ -3,5 +3,6 @@
 
 #[cfg_attr(lpc55, path = "./gpio/lpc55.rs")]
 #[cfg_attr(rt1xxx, path = "./gpio/rt1xxx.rs")]
+#[cfg_attr(kinetis, path = "./gpio/kinetis.rs")]
 mod inner;
 pub use inner::*;

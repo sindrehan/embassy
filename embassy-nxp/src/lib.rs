@@ -6,6 +6,8 @@ pub(crate) mod fmt;
 
 #[cfg(lpc55)]
 pub mod adc;
+#[cfg(kinetis)]
+pub mod clocks;
 #[cfg(lpc55)]
 pub mod dma;
 pub mod gpio;
@@ -32,6 +34,7 @@ mod time_driver;
 #[cfg_attr(lpc55, path = "chips/lpc55.rs")]
 #[cfg_attr(feature = "mimxrt1011", path = "chips/mimxrt1011.rs")]
 #[cfg_attr(feature = "mimxrt1062", path = "chips/mimxrt1062.rs")]
+#[cfg_attr(feature = "mkl82z7", path = "chips/mkl82z7.rs")]
 mod chip;
 
 pub use chip::{Peripherals, interrupt, peripherals};
@@ -158,7 +161,21 @@ pub fn init(_config: config::Config) -> Peripherals {
         pac::CCM.ccgr6().modify(|v| v.set_cg0(1));
     }
 
-    #[cfg(any(lpc55, rt1xxx))]
+    #[cfg(kinetis)]
+    {
+        // The Kinetis watchdog runs out of reset, clocked from the 1 kHz LPO with a timeout of
+        // roughly half a second. Both unlock writes must land within 20 bus cycles of each
+        // other and the configuration update within 256 bus cycles after them, so no
+        // interrupt may get in between.
+        critical_section::with(|_| {
+            pac::WDOG.unlock().write(|w| w.set_wdogunlock(0xC520));
+            pac::WDOG.unlock().write(|w| w.set_wdogunlock(0xD928));
+            pac::WDOG.stctrlh().modify(|w| w.set_wdogen(false));
+        });
+        info!("Watchdog disabled");
+    }
+
+    #[cfg(any(lpc55, rt1xxx, kinetis))]
     gpio::init();
 
     #[cfg(lpc55)]

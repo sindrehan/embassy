@@ -8,7 +8,9 @@ use nxp_pac::metadata;
 use nxp_pac::metadata::{METADATA, Peripheral};
 #[allow(unused)]
 use proc_macro2::TokenStream;
-use proc_macro2::{Ident, Literal, Span};
+#[allow(unused)]
+use proc_macro2::Literal;
+use proc_macro2::{Ident, Span};
 use quote::format_ident;
 #[allow(unused)]
 use quote::quote;
@@ -22,12 +24,16 @@ fn main() {
 
     let chip_name = match env::vars()
         .map(|(a, _)| a)
-        .filter(|x| x.starts_with("CARGO_FEATURE_MIMXRT") || x.starts_with("CARGO_FEATURE_LPC"))
+        .filter(|x| {
+            x.starts_with("CARGO_FEATURE_MIMXRT")
+                || x.starts_with("CARGO_FEATURE_LPC")
+                || x.starts_with("CARGO_FEATURE_MKL")
+        })
         .get_one()
     {
         Ok(x) => x,
-        Err(GetOneError::None) => panic!("No mimxrt/lpc Cargo feature enabled"),
-        Err(GetOneError::Multiple) => panic!("Multiple mimxrt/lpc Cargo features enabled"),
+        Err(GetOneError::None) => panic!("No mimxrt/lpc/mkl Cargo feature enabled"),
+        Err(GetOneError::Multiple) => panic!("Multiple mimxrt/lpc/mkl Cargo features enabled"),
     }
     .strip_prefix("CARGO_FEATURE_")
     .unwrap()
@@ -43,9 +49,20 @@ fn main() {
         lpc55: { any(feature = "lpc55s16", feature = "lpc55-core0") },
     }
 
+    cfg_aliases! {
+        kinetis: { feature = "mkl82z7" },
+    }
+
     eprintln!("chip: {chip_name}");
 
     generate_code(&mut cfgs, &singletons);
+}
+
+/// The instance suffix of a DMA controller: `"0"` for `DMA0`, `""` for the single unnumbered
+/// Kinetis `DMA`. `None` for anything else that merely starts with `DMA`, such as `DMAMUX`.
+fn dma_instance(name: &str) -> Option<&str> {
+    let instance = name.strip_prefix("DMA")?;
+    (instance.is_empty() || instance.parse::<u8>().is_ok()).then_some(instance)
 }
 
 /// A peripheral singleton returned by `embassy_nxp::init`.
@@ -61,11 +78,7 @@ fn singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
 
     for peripheral in METADATA.peripherals {
         // GPIO and DMA are generated in a 2nd pass.
-        let skip_singleton = if peripheral.name.starts_with("GPIO") || peripheral.name.starts_with("DMA") {
-            true
-        } else {
-            false
-        };
+        let skip_singleton = peripheral.name.starts_with("GPIO") || dma_instance(peripheral.name).is_some();
 
         if !skip_singleton {
             singletons.push(Singleton {
@@ -91,15 +104,19 @@ fn singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
     ]);
 
     for peripheral in METADATA.peripherals.iter().filter(|p| p.name.starts_with("GPIO")) {
-        let number = peripheral.name.strip_prefix("GPIO").unwrap();
-        assert!(number.parse::<u8>().is_ok());
-        cfgs.enable(format!("gpio{}", number));
+        let instance = peripheral.name.strip_prefix("GPIO").unwrap();
+        // RT1xxx and LPC55 number their GPIO banks, Kinetis letters them (GPIOA..GPIOE).
+        let numbered = instance.parse::<u8>().is_ok();
+        assert!(numbered || (!instance.is_empty() && instance.chars().all(|c| c.is_ascii_uppercase())));
+        if numbered {
+            cfgs.enable(format!("gpio{}", instance));
+        }
 
         for signal in peripheral.signals.iter() {
             let pin_number = signal.name.parse::<u8>().unwrap();
 
-            if pin_number > 15 {
-                cfgs.enable(format!("gpio{}_hi", number));
+            if numbered && pin_number > 15 {
+                cfgs.enable(format!("gpio{}_hi", instance));
             }
 
             // GPIO signals only defined a single signal, on a single pin.
@@ -112,10 +129,11 @@ fn singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
         }
     }
 
-    for peripheral in METADATA.peripherals.iter().filter(|p| p.name.starts_with("DMA")) {
-        let instance = peripheral.name.strip_prefix("DMA").unwrap();
-        assert!(instance.parse::<u8>().is_ok());
-
+    for (peripheral, instance) in METADATA
+        .peripherals
+        .iter()
+        .filter_map(|p| dma_instance(p.name).map(|i| (p, i)))
+    {
         for signal in peripheral.signals.iter() {
             let channel_number = signal.name.parse::<u8>().unwrap();
             let name = format!("DMA{instance}_CH{channel_number}");
@@ -268,6 +286,7 @@ fn peripherals(singletons: &[Singleton]) -> TokenStream {
     }
 }
 
+#[cfg(not(feature = "_kinetis"))]
 fn impl_adc(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     for signal in peripheral.signals.iter() {
         let (ch_num, ch_side) = signal.name.rsplit_once("_").unwrap();
@@ -303,6 +322,7 @@ fn impl_gpio_pin(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
+#[cfg(not(feature = "_kinetis"))]
 fn impl_dma_channel(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
 
@@ -316,6 +336,7 @@ fn impl_dma_channel(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
+#[cfg(not(feature = "_kinetis"))]
 fn impl_usart(cfgs: &mut common::CfgSet, impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     cfgs.declare_all(&[
         "has_usart_txd_pins",
@@ -388,6 +409,7 @@ fn impl_usart(cfgs: &mut common::CfgSet, impls: &mut Vec<TokenStream>, periphera
     }
 }
 
+#[cfg(not(feature = "_kinetis"))]
 fn impl_sct(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
 
@@ -419,6 +441,7 @@ fn impl_sct(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
+#[cfg(not(feature = "_kinetis"))]
 fn impl_spi(cfgs: &mut common::CfgSet, impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     cfgs.declare_all(&["has_spi_sck_pins", "has_spi_mosi_pins", "has_spi_miso_pins"]);
 
@@ -461,34 +484,68 @@ fn impl_spi(cfgs: &mut common::CfgSet, impls: &mut Vec<TokenStream>, peripheral:
     }
 }
 
-fn impl_peripherals(cfgs: &mut common::CfgSet, _singletons: &[Singleton]) -> TokenStream {
+/// Kinetis clock gating: one `SIM_SCGCx` bit per peripheral.
+#[cfg(feature = "_kinetis")]
+fn impl_clock_gate(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let Some(gate) = peripheral.gate.as_ref() else {
+        return;
+    };
+
+    let instance = Ident::new(peripheral.name, Span::call_site());
+    let reg = format_ident!("{}", gate.enable);
+    let getter = format_ident!("{}", gate.bit);
+    let setter = format_ident!("set_{}", gate.bit);
+
+    impls.push(quote! {
+        impl_clock_gate!(#instance, #reg, #getter, #setter);
+    });
+}
+
+fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> TokenStream {
     let mut impls = Vec::new();
 
     for peripheral in metadata::METADATA.peripherals.iter() {
-        if peripheral.name.starts_with("ADC") {
-            impl_adc(&mut impls, peripheral);
-        }
+        let is_singleton = singletons.iter().any(|s| s.name == peripheral.name);
 
         if peripheral.name.starts_with("GPIO") {
             impl_gpio_pin(&mut impls, peripheral);
         }
 
-        if peripheral.name.starts_with("DMA") {
-            impl_dma_channel(&mut impls, peripheral);
+        #[cfg(feature = "_kinetis")]
+        if is_singleton {
+            impl_clock_gate(&mut impls, peripheral);
         }
 
-        if peripheral.name.starts_with("USART") {
-            impl_usart(cfgs, &mut impls, peripheral);
-        }
+        // The LPC55 drivers. Kinetis peripherals of the same name (ADC0, SPI0, ...) have
+        // different signal names and no FLEXCOMM, and no drivers yet.
+        #[cfg(not(feature = "_kinetis"))]
+        {
+            let _ = is_singleton;
 
-        if peripheral.name.starts_with("SPI") {
-            impl_spi(cfgs, &mut impls, peripheral);
-        }
+            if peripheral.name.starts_with("ADC") {
+                impl_adc(&mut impls, peripheral);
+            }
 
-        if peripheral.name.starts_with("SCT") {
-            impl_sct(&mut impls, peripheral);
+            if dma_instance(peripheral.name).is_some() {
+                impl_dma_channel(&mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("USART") {
+                impl_usart(cfgs, &mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("SPI") {
+                impl_spi(cfgs, &mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("SCT") {
+                impl_sct(&mut impls, peripheral);
+            }
         }
     }
+
+    #[cfg(feature = "_kinetis")]
+    let _ = cfgs;
 
     quote! {
         #(#impls)*

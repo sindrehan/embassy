@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 ## Unreleased - ReleaseDate
+- MKL82Z7 (Kinetis KL82): chip support with clock gating (`clocks`), GPIO and watchdog disable in `init`
 - LPC55: blocking version of SPI
 - Codegen using `nxp-pac` metadata
 - LPC55: PWM simple
