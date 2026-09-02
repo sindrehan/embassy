@@ -245,6 +245,7 @@ impl ClockConfig {
             qspi: mcgout / self.qspi_div as u32,
             pllfll: if vlpr { 0 } else { IRC48M_HZ },
             lpuart: if vlpr { FAST_IRC_HZ } else { IRC48M_HZ },
+            pll: matches!(self.mcg, McgMode::Pee { .. }),
         }
     }
 
@@ -311,6 +312,8 @@ pub struct Clocks {
     pub pllfll: u32,
     /// The LPUART module clock: the 48 MHz IRC48M, or the 4 MHz fast IRC in VLPR.
     pub lpuart: u32,
+    /// Whether `MCGOUTCLK` comes from the PLL (PEE).
+    pub pll: bool,
 }
 
 /// The `SIM_SOPT2[LPUARTSRC]` selection matching [`Clocks::lpuart`].
@@ -326,6 +329,7 @@ static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {
     qspi: 0,
     pllfll: 0,
     lpuart: 0,
+    pll: false,
 }));
 
 /// The clock frequencies configured by [`init`](crate::init).

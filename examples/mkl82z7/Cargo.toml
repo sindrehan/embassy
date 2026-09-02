@@ -15,6 +15,7 @@ panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 embassy-nxp = { version = "0.1.0", path = "../../embassy-nxp", features = ["defmt", "mkl82z7", "unstable-pac", "time-driver-tpm"] }
 embassy-executor = { version = "0.10.0", path = "../../embassy-executor", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.5.1", path = "../../embassy-time", features = ["defmt", "tick-hz-1_000_000"] }
+embassy-hal-internal = { version = "0.5.0", path = "../../embassy-hal-internal" }
 embassy-futures = { version = "0.1.2", path = "../../embassy-futures" }
 heapless = "0.8"
 

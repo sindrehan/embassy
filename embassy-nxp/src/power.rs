@@ -10,7 +10,7 @@
 //!   the fast IRC, is kept running in stop), so `embassy-time` wakes the core as usual. Bus
 //!   peripherals only keep working while asleep in WAIT and partial stop 2; in STOP and VLPS
 //!   their clocks stop and, for example, incoming LPUART bytes are lost until the next wake.
-//!   The debugger may lose its connection while the core is in STOP or VLPS.
+//!   The debug port does not answer in any stop mode, see [`Config::sleep_mode`].
 //! - **Low leakage.** [`stop`] enters LLS or VLLS with LLWU pin and LPTMR timeout wake sources.
 //!   `embassy-time` does not advance while in these modes. VLLS exits through a reset; see
 //!   [`woke_from_vlls`] and [`release_io_after_vlls`].
@@ -20,6 +20,12 @@ use core::time::Duration;
 use embassy_hal_internal::interrupt::InterruptExt;
 
 use crate::clocks::{ClockConfig, McgMode, RunMode};
+
+impl ClockConfig {
+    fn uses_pll(&self) -> bool {
+        matches!(self.mcg, McgMode::Pee { .. })
+    }
+}
 use crate::gpio::{Bank, Input};
 use crate::pac::llwu::vals::Wupe;
 use crate::pac::lptmr::vals::Pcs;
@@ -48,6 +54,10 @@ pub enum SleepMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
+    /// What the executor's idle enters. Note that the debug port does not answer while the core
+    /// is in any stop mode, so a probe-rs session polling RTT loses the target; develop with
+    /// [`SleepMode::Wait`] or without an attached session, and reflash with
+    /// `--connect-under-reset`.
     pub sleep_mode: SleepMode,
 }
 
@@ -109,7 +119,7 @@ pub(crate) fn init_protection() {
 
 /// Applies the idle sleep mode and, last of all, VLPR.
 pub(crate) fn init(config: &Config, clocks: &ClockConfig) {
-    set_sleep_mode(config.sleep_mode, clocks);
+    apply_sleep_mode(config.sleep_mode, clocks.uses_pll());
 
     if clocks.run_mode == RunMode::VeryLowPower {
         // Everything that touches the MCG or the clock dividers has run by now; from here on
@@ -121,18 +131,38 @@ pub(crate) fn init(config: &Config, clocks: &ClockConfig) {
     }
 }
 
-fn set_sleep_mode(mode: SleepMode, clocks: &ClockConfig) {
+/// Change what the executor's idle enters, at runtime. Unlike the value in [`Config`], this is
+/// applied as given, debugger or not.
+pub fn set_sleep_mode(mode: SleepMode) {
+    apply_sleep_mode(mode, crate::clocks::clocks().pll);
+}
+
+/// The idle sleep mode currently configured.
+pub fn sleep_mode() -> SleepMode {
+    let deep = unsafe { (*cortex_m::peripheral::SCB::PTR).scr.read() } & (1 << 2) != 0;
+    if !deep {
+        return SleepMode::Wait;
+    }
+    match (SMC.pmctrl().read().stopm(), SMC.stopctrl().read().pstopo()) {
+        (Stopm::_010, _) => SleepMode::VeryLowPowerStop,
+        (_, Pstopo::_01) => SleepMode::PartialStop1,
+        (_, Pstopo::_10) => SleepMode::PartialStop2,
+        _ => SleepMode::Stop,
+    }
+}
+
+fn apply_sleep_mode(mode: SleepMode, pll: bool) {
     let deep = mode != SleepMode::Wait;
     if mode == SleepMode::VeryLowPowerStop {
         assert!(
-            !matches!(clocks.mcg, McgMode::Pee { .. }),
+            !pll,
             "VLPS is not available with a PLL clock configuration: the MCG drops to PBE on exit"
         );
     }
 
     // Keep the selected IRC (the time driver's clock) and, in PEE, the PLL alive through stop.
     MCG.c1().modify(|w| w.set_irefsten(deep));
-    if matches!(clocks.mcg, McgMode::Pee { .. }) {
+    if pll {
         MCG.c5().modify(|w| w.set_pllsten(deep));
     }
 
@@ -239,9 +269,19 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
     let reason = critical_section::with(|_| {
         Interrupt::LLWU.unpend();
         unsafe { Interrupt::LLWU.enable() };
+        if timeout {
+            // Should the low leakage entry be refused (for example with a debugger attached),
+            // the LPTMR's own interrupt still ends the plain stop that results.
+            Interrupt::LPTMR0.unpend();
+            unsafe { Interrupt::LPTMR0.enable() };
+        }
         cortex_m::asm::dsb();
         cortex_m::asm::wfi();
         cortex_m::asm::isb();
+
+        if SMC.pmctrl().read().stopa() {
+            warn!("Low leakage stop entry was aborted");
+        }
 
         let mut reason = WakeReason::Other;
         for i in 0..4 {
@@ -253,11 +293,13 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
             }
             LLWU.pf(i).write(|w| w.0 = 0xFF);
         }
-        if LLWU.mf5().read().mwuf(0) {
+        if LLWU.mf5().read().mwuf(0) || (timeout && LPTMR0.csr().read().tcf()) {
             reason = WakeReason::Timeout;
         }
         Interrupt::LLWU.disable();
         Interrupt::LLWU.unpend();
+        Interrupt::LPTMR0.disable();
+        Interrupt::LPTMR0.unpend();
         reason
     });
 

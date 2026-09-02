@@ -89,10 +89,17 @@ partial stop 1 or 2, STOP or VLPS; the TPM tick keeps running in all of them.
 `power::stop` enters LLS3 or a VLLS mode with LLWU pin and LPTMR timeout wake
 sources; VLLS exits through a reset, see `power::woke_from_vlls` and
 `power::release_io_after_vlls`. `low_power` runs through VLPR plus VLPS idle,
-LLS3 and VLLS3 with SW3 (PTD0) and a 5 s timeout as wake sources.
+LLS3 and VLLS3 with SW3 (PTD0) and a 5 s timeout as wake sources, and
+`sleep_modes` walks every idle mode timing ten 250 ms timers (2500 ms in each,
+in RUN and in VLPR). Both log over LPUART0.
 
-The debugger loses the core while it sleeps in VLPS, LLS or VLLS, so RTT
-output pauses; the LED still shows progress. **Not yet verified on hardware.**
+The debug port does not answer while the core is in any stop mode. A probe-rs
+session polling RTT then errors out, and its shutdown halts or resets the
+target, which looks like the firmware hanging. So for these examples flash and
+start the chip without keeping a session: `probe-rs download` and `probe-rs
+reset`, or J-Link `loadbin` plus `r`, `g`, and read the serial port. Reflashing
+a chip that sleeps in VLPS needs the reset line: the runner in
+`.cargo/config.toml` passes `--connect-under-reset` for that reason.
 
 ## Chip quirks handled here
 
