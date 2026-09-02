@@ -70,7 +70,7 @@ use core::cell::Cell;
 use critical_section::Mutex;
 
 use crate::pac::mcg::vals::{Clks, Clkst, DrstDrs, Fcrdiv, Frdiv, Range};
-use crate::pac::sim::vals::{Outdiv1, Outdiv2, Outdiv4, Outdiv5};
+use crate::pac::sim::vals::{Outdiv1, Outdiv2, Outdiv4, Outdiv5, Pllfllsel};
 use crate::pac::smc::vals::Runm;
 use crate::pac::{MCG, OSC, SIM, SMC};
 
@@ -85,6 +85,8 @@ const RUN_MAX_CORE_HZ: u32 = 72_000_000;
 const HSRUN_MAX_CORE_HZ: u32 = 96_000_000;
 /// Bus and flash clock limit.
 const MAX_BUS_HZ: u32 = 24_000_000;
+/// 48 MHz internal reference, selected as the PLLFLLSEL peripheral clock.
+const IRC48M_HZ: u32 = 48_000_000;
 
 /// The source of the external reference clock on `EXTAL0`/`XTAL0`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +210,7 @@ impl ClockConfig {
             bus: mcgout / self.bus_div as u32,
             flash: mcgout / self.flash_div as u32,
             qspi: mcgout / self.qspi_div as u32,
+            pllfll: IRC48M_HZ,
         }
     }
 
@@ -261,6 +264,9 @@ pub struct Clocks {
     pub flash: u32,
     /// QuadSPI clock.
     pub qspi: u32,
+    /// The `SIM_SOPT2[PLLFLLSEL]` peripheral clock offered to LPUART, TPM, FlexIO, EMVSIM and
+    /// USB. `init` points it at the 48 MHz IRC48M.
+    pub pllfll: u32,
 }
 
 static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {
@@ -269,6 +275,7 @@ static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {
     bus: 0,
     flash: 0,
     qspi: 0,
+    pllfll: 0,
 }));
 
 /// The clock frequencies configured by [`init`](crate::init).
@@ -304,6 +311,9 @@ pub(crate) fn init(config: ClockConfig) {
     if clocks.mcgout < current {
         set_dividers(&config);
     }
+
+    // Selecting the IRC48M here also enables it. The fractional divider (CLKDIV3) is /1 at reset.
+    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_pllfllsel(Pllfllsel::_11)));
 
     critical_section::with(|cs| CLOCKS.borrow(cs).set(clocks));
     debug!("Clocks: {:?}", clocks);

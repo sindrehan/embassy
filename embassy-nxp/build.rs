@@ -504,6 +504,38 @@ fn impl_clock_gate(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     });
 }
 
+/// Kinetis LPUART: instance, NVIC interrupt when it has one (LPUART2 sits behind INTMUX), pins.
+#[cfg(feature = "_kinetis")]
+fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+
+    impls.push(quote! {
+        impl_lpuart_instance!(#instance);
+    });
+
+    if METADATA.interrupts.iter().any(|(name, _)| *name == peripheral.name) {
+        impls.push(quote! {
+            impl_lpuart_interrupt!(#instance, #instance);
+        });
+    }
+
+    for signal in peripheral.signals {
+        let r#macro = match signal.name {
+            "TX" => format_ident!("impl_lpuart_tx_pin"),
+            "RX" => format_ident!("impl_lpuart_rx_pin"),
+            _ => continue,
+        };
+
+        for pin in signal.pins {
+            let alt = Literal::u8_unsuffixed(pin.alt);
+            let pin = format_ident!("{}", pin.pin);
+            impls.push(quote! {
+                #r#macro!(#pin, #instance, #alt);
+            });
+        }
+    }
+}
+
 fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> TokenStream {
     let mut impls = Vec::new();
 
@@ -517,6 +549,10 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
         #[cfg(feature = "_kinetis")]
         if is_singleton {
             impl_clock_gate(&mut impls, peripheral);
+
+            if peripheral.name.starts_with("LPUART") {
+                impl_lpuart(&mut impls, peripheral);
+            }
         }
 
         // The LPC55 drivers. Kinetis peripherals of the same name (ADC0, SPI0, ...) have

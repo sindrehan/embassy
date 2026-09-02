@@ -11,6 +11,8 @@ pub mod clocks;
 #[cfg(lpc55)]
 pub mod dma;
 pub mod gpio;
+#[cfg(kinetis)]
+pub mod lpuart;
 #[cfg(lpc55)]
 pub mod pint;
 #[cfg(lpc55)]
