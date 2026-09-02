@@ -87,8 +87,8 @@ IRC, 1 MHz flash, LPUART moves to the 4 MHz IRC because the 48 MHz one is
 off). `Config::power.sleep_mode` picks what the executor's idle enters: WAIT,
 partial stop 1 or 2, STOP or VLPS; the TPM tick keeps running in all of them.
 `power::stop` enters LLS3 or a VLLS mode with LLWU pin and LPTMR timeout wake
-sources; VLLS exits through a reset, see `power::woke_from_vlls` and
-`power::release_io_after_vlls`. `low_power` runs through VLPR plus VLPS idle,
+sources; VLLS exits through a reset, see `power::vlls_wake_reason` (the LLWU
+keeps its flags through that reset) and `power::release_io_after_vlls`. `low_power` runs through VLPR plus VLPS idle,
 LLS3 and VLLS3 with SW3 (PTD0) and a 5 s timeout as wake sources, and
 `sleep_modes` walks every idle mode timing ten 250 ms timers (2500 ms in each,
 in RUN and in VLPR). Both log over LPUART0.

@@ -2,7 +2,7 @@
 //! VLPS as the idle sleep, blinks the red LED on embassy-time for a few
 //! seconds, then enters LLS3 until SW3 (PTD0, LLWU_P12) is pressed or a 5 s
 //! LPTMR timeout fires, and finally goes to VLLS3 with the same wake sources;
-//! the wakeup from VLLS is a reset, which the start of `main` reports.
+//! the wakeup from VLLS is a reset, and the start of `main` reports its source.
 //!
 //! The debugger loses the core while it sleeps in VLPS, LLS and VLLS, and with
 //! it the RTT output, so this example also logs over LPUART0 (PTB17/PTB16, the
@@ -40,15 +40,16 @@ async fn main(_spawner: Spawner) {
     config.clocks = ClockConfig::vlpr();
     config.power.sleep_mode = SleepMode::VeryLowPowerStop;
     let p = embassy_nxp::init(config);
-    let woke = power::woke_from_vlls();
+    // Read (and clear) the VLLS wake source before the pins are released.
+    let vlls_wake = power::vlls_wake_reason();
     let mut led = Output::new(p.PTC1, Level::High);
     let button = Input::new(p.PTD0, Pull::Up);
     let mut uart = Lpuart::new_blocking(p.LPUART0, p.PTB17, p.PTB16, lpuart::Config::default());
-    if woke {
+    if let Some(reason) = vlls_wake {
         // Pins were frozen from before the sleep until now; they are set up again, so release.
         power::release_io_after_vlls();
-        defmt::info!("woke from VLLS through a reset");
-        log(&mut uart, format_args!("woke from VLLS through a reset, RCM says wakeup"));
+        defmt::info!("woke from VLLS through a reset: {:?}", reason);
+        log(&mut uart, format_args!("woke from VLLS through a reset: {:?}", reason));
     }
 
     let clocks = embassy_nxp::clocks::clocks();

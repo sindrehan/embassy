@@ -13,7 +13,7 @@
 //!   The debug port does not answer in any stop mode, see [`Config::sleep_mode`].
 //! - **Low leakage.** [`stop`] enters LLS or VLLS with LLWU pin and LPTMR timeout wake sources.
 //!   `embassy-time` does not advance while in these modes. VLLS exits through a reset; see
-//!   [`woke_from_vlls`] and [`release_io_after_vlls`].
+//!   [`vlls_wake_reason`] and [`release_io_after_vlls`].
 
 use core::time::Duration;
 
@@ -322,6 +322,37 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
 /// Whether the last reset was the wakeup from a VLLS mode.
 pub fn woke_from_vlls() -> bool {
     RCM.srs0().read().wakeup()
+}
+
+/// Why the VLLS sleep ended, when the last reset was a VLLS wakeup.
+///
+/// The LLWU keeps its registers through that reset, so the pin flags name the pin. Module
+/// flags follow their peripheral, which the reset does clear, so a wake with no pin flag while
+/// the LPTMR was armed is reported as [`WakeReason::Timeout`]. Reading the reason also clears
+/// the flags and disarms the wake sources, which must happen before
+/// [`release_io_after_vlls`] to keep a stale source from firing again. Call it once.
+pub fn vlls_wake_reason() -> Option<WakeReason> {
+    if !woke_from_vlls() {
+        return None;
+    }
+    let mut reason = WakeReason::Other;
+    for i in 0..4 {
+        let flags = LLWU.pf(i).read();
+        for bit in 0..8 {
+            if flags.wuf(bit) {
+                reason = WakeReason::Pin((i * 8 + bit) as u8);
+            }
+        }
+        LLWU.pf(i).write(|w| w.0 = 0xFF);
+    }
+    if reason == WakeReason::Other && (LLWU.mf5().read().mwuf(0) || LLWU.me().read().wume(0)) {
+        reason = WakeReason::Timeout;
+    }
+    for i in 0..8 {
+        LLWU.pe(i).write(|_| {});
+    }
+    LLWU.me().write(|_| {});
+    Some(reason)
 }
 
 /// After a VLLS wakeup reset the pins stay frozen in their pre-sleep state until this is called.
