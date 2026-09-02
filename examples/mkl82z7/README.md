@@ -50,14 +50,17 @@ loopback. The DMA interrupts belong to the HAL; nothing needs binding.
 
 `i2c_accel` reads the on-board FXOS8700CQ accelerometer over I2C0 (PTD2 SCL,
 PTD3 SDA, address 0x1C): WHO_AM_I through the blocking and the async API, a
-deliberate NACK from an empty address, then a few acceleration samples.
+deliberate NACK from an empty address, then a few acceleration samples, and
+repeats the register traffic through `I2c::new_with_dma`, where the middle of
+each run moves by DMA and the bytes that steer ACK and STOP stay in software.
 
 ## SPI
 
 `spi_loopback` drives SPI0 on the Arduino header: SCK PTC5 (D13), SOUT PTC6
 (D11), SIN PTC7 (D12). Jumper D11 to D12 and it checks 64 bytes through the
-async API at 1 MHz and the blocking API at 8 MHz. The driver does not drive a
-chip select; use a GPIO (for example `embassy_embedded_hal::SpiDevice`). SPI0
+async API at 1 MHz and the blocking API at 8 MHz, then the DMA-fed driver
+(`Spi::new_with_dma`, two channels) with 64 bytes at 1 MHz and 1024 bytes at
+8 MHz. The driver does not drive a chip select; use a GPIO (for example `embassy_embedded_hal::SpiDevice`). SPI0
 has a 4-deep FIFO, SPI1 a single entry and its interrupt goes through INTMUX0.
 
 ## INTMUX0
