@@ -1,9 +1,8 @@
 # MKL82Z7 (Kinetis KL82) examples
 
 Tested on the FRDM-KL82Z. The onboard OpenSDA debugger runs SEGGER J-Link
-firmware (USB 1366:1015). probe-rs has no built-in KL82 target, so
-`MKL82Z7.yaml` carries the chip description and `.cargo/config.toml` points
-`cargo run` at it:
+firmware (USB 1366:1015). `cargo run` uses probe-rs, which needs the MKL82Z7
+family target (added to probe-rs in September 2026):
 
 ```sh
 cargo run --bin blinky
@@ -12,7 +11,9 @@ cargo run --bin hello
 
 The examples go through `embassy-nxp` with the `mkl82z7` feature. The HAL
 disables the watchdog in `__pre_init`, `init` gates on the PORT clocks, and other peripheral
-clocks are opened with `embassy_nxp::clocks::enable::<peripherals::X>()`.
+clocks are opened with `embassy_nxp::clocks::enable::<peripherals::X>()`. The
+`time-driver-tpm` feature runs `embassy-time` at 1 MHz from TPM0, clocked by the
+4 MHz fast internal reference, so it is independent of the core clock setup.
 
 ## Chip quirks handled here
 
