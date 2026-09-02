@@ -536,6 +536,38 @@ fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
+/// Kinetis I2C: instance, NVIC interrupt when it has one (I2C1 sits behind INTMUX), pins.
+#[cfg(feature = "_kinetis")]
+fn impl_i2c(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+
+    impls.push(quote! {
+        impl_i2c_instance!(#instance);
+    });
+
+    if METADATA.interrupts.iter().any(|(name, _)| *name == peripheral.name) {
+        impls.push(quote! {
+            impl_i2c_interrupt!(#instance, #instance);
+        });
+    }
+
+    for signal in peripheral.signals {
+        let r#macro = match signal.name {
+            "SCL" => format_ident!("impl_i2c_scl_pin"),
+            "SDA" => format_ident!("impl_i2c_sda_pin"),
+            _ => continue,
+        };
+
+        for pin in signal.pins {
+            let alt = Literal::u8_unsuffixed(pin.alt);
+            let pin = format_ident!("{}", pin.pin);
+            impls.push(quote! {
+                #r#macro!(#pin, #instance, #alt);
+            });
+        }
+    }
+}
+
 fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> TokenStream {
     let mut impls = Vec::new();
 
@@ -552,6 +584,10 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
 
             if peripheral.name.starts_with("LPUART") {
                 impl_lpuart(&mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("I2C") {
+                impl_i2c(&mut impls, peripheral);
             }
         }
 

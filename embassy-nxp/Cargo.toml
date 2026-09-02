@@ -41,6 +41,8 @@ embassy-time-driver = { version = "0.2.2", path = "../embassy-time-driver", opti
 embassy-time-queue-utils = { version = "0.3.2", path = "../embassy-time-queue-utils", optional = true }
 embedded-io = { version = "0.7.1" }
 embedded-hal-02 = { package = "embedded-hal", version = "0.2.6", features = ["unproven"] }
+embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
+embedded-hal-async = { version = "1.0" }
 ## Chip dependencies
 # TODO: switch back to the embassy-rs/nxp-pac git dependency once the mkl82z7
 # feature and metadata are upstream. Until then this points at a local checkout of

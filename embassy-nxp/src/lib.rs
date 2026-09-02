@@ -12,6 +12,8 @@ pub mod clocks;
 pub mod dma;
 pub mod gpio;
 #[cfg(kinetis)]
+pub mod i2c;
+#[cfg(kinetis)]
 pub mod lpuart;
 #[cfg(lpc55)]
 pub mod pint;
