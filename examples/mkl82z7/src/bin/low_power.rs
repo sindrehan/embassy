@@ -57,8 +57,13 @@ async fn main(_spawner: Spawner) {
     log(
         &mut uart,
         format_args!(
-            "low power: VLPR, idle VLPS, core {} Hz, bus {} Hz, flash {} Hz, lpuart {} Hz",
-            clocks.core, clocks.bus, clocks.flash, clocks.lpuart
+            "low power: VLPR, idle VLPS, core {} Hz, bus {} Hz, flash {} Hz, lpuart {} Hz, reset SRS0={:#04x} SRS1={:#04x}",
+            clocks.core,
+            clocks.bus,
+            clocks.flash,
+            clocks.lpuart,
+            embassy_nxp::pac::RCM.srs0().read().0,
+            embassy_nxp::pac::RCM.srs1().read().0
         ),
     );
 
