@@ -1,0 +1,14 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+# The FRDM-KL82Z OpenSDA runs J-Link firmware. probe-rs has no built-in
+# MKL82 target, so the chip description comes from MKL82Z7.yaml.
+runner = "probe-rs run --chip MKL82Z128VLK7 --chip-description-path MKL82Z7.yaml --protocol swd"
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=-Tdefmt.x",
+]
+
+[env]
+DEFMT_LOG = "debug"

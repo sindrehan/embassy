@@ -1,0 +1,36 @@
+[package]
+name = "embassy-nxp-mkl82z7-examples"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# These examples use the PAC directly. embassy-nxp does not support the
+# Kinetis KL82 yet: its build script needs nxp-pac `metadata` (pins,
+# signals, clock gates) which the MKL82Z7 PAC does not provide so far.
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+cortex-m-semihosting = "0.5"
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+# TODO: switch to the embassy-rs/nxp-pac git dependency once the mkl82z7
+# feature is upstream. Until then this points at a local checkout of
+# https://github.com/sindrehan/nxp-pac, branch `mkl82z7`.
+nxp-pac = { version = "0.1.0", path = "../../../nxp-pac/nxp-pac", features = ["mkl82z7", "rt", "defmt"] }
+
+[profile.dev]
+opt-level = 1
+debug = 2
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "s"
+
+[package.metadata.embassy]
+build = [
+  { target = "thumbv6m-none-eabi", artifact-dir = "out/examples/mkl82z7" }
+]
