@@ -162,6 +162,9 @@ pub fn init(_config: config::Config) -> Peripherals {
         pac::CCM.ccgr6().modify(|v| v.set_cg0(1));
     }
 
+    #[cfg(kinetis)]
+    clocks::init(_config.clocks);
+
     #[cfg(any(lpc55, rt1xxx, kinetis))]
     gpio::init();
 
@@ -205,7 +208,11 @@ pub unsafe extern "C" fn __pre_init() {
 /// HAL configuration for the NXP board.
 pub mod config {
     #[derive(Default)]
-    pub struct Config {}
+    pub struct Config {
+        /// System clock configuration.
+        #[cfg(kinetis)]
+        pub clocks: crate::clocks::ClockConfig,
+    }
 }
 
 #[allow(unused)]
