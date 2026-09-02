@@ -21,6 +21,15 @@ uses `ClockConfig::pll` with the board's 12 MHz crystal: PLL at 144 MHz, 72 MHz
 core, 24 MHz bus and flash. Both print the resulting clocks and a busy-loop
 benchmark, which runs about 3.4 times faster on the PLL (72 over 21 MHz).
 
+## GPIO interrupts
+
+`Input` and `Flex` have `wait_for_high`, `wait_for_low` and the edge waits,
+backed by the per-pin PORT interrupts (one NVIC line per port, owned by the
+HAL), plus the embedded-hal `Wait` and digital traits. `gpio_irq` checks them
+through the D11 to D12 jumper: PTC6 drives, PTC7 waits, and each wait is timed
+against a 50 ms flip. For a real button, SW3 is PTD0 and SW2 is PTA4, both
+active low with `Pull::Up`.
+
 ## Serial
 
 `serial` echoes on LPUART0 (PTB17 TX, PTB16 RX, 115200 8N1), which the board
