@@ -37,6 +37,13 @@ checks 64 bytes through the async API at 115200 and the blocking API at 9600,
 then exits. LPUART2 has no NVIC vector of its own (it sits behind INTMUX0), so
 it is blocking only.
 
+## I2C
+
+`i2c_accel` reads the on-board FXOS8700CQ accelerometer over I2C0 (PTD2 SCL,
+PTD3 SDA, address 0x1C): WHO_AM_I through the blocking and the async API, a
+deliberate NACK from an empty address, then a few acceleration samples. I2C1
+is blocking only for the same INTMUX reason as LPUART2.
+
 ## Chip quirks handled here
 
 - **Flash configuration field at 0x400..0x40F.** `memory.x` places the
