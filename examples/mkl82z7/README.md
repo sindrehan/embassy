@@ -44,6 +44,14 @@ has only a 1-byte receive buffer, so without DMA keep it to modest baud rates.
 PTD3 SDA, address 0x1C): WHO_AM_I through the blocking and the async API, a
 deliberate NACK from an empty address, then a few acceleration samples.
 
+## SPI
+
+`spi_loopback` drives SPI0 on the Arduino header: SCK PTC5 (D13), SOUT PTC6
+(D11), SIN PTC7 (D12). Jumper D11 to D12 and it checks 64 bytes through the
+async API at 1 MHz and the blocking API at 8 MHz. The driver does not drive a
+chip select; use a GPIO (for example `embassy_embedded_hal::SpiDevice`). SPI0
+has a 4-deep FIFO, SPI1 a single entry and its interrupt goes through INTMUX0.
+
 ## INTMUX0
 
 `intmux` shows the peripherals without an NVIC line of their own: I2C1 and
