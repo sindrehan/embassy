@@ -4,10 +4,12 @@
 //! [`init`](crate::init) selects, so baud rates do not depend on the core clock configuration.
 //!
 //! The async API is interrupt driven: TX refills the FIFO from the `TDRE` interrupt and RX wakes
-//! on `RDRF`, one interrupt per received byte. LPUART0 and LPUART1 have 8-byte FIFOs; LPUART2
-//! has a single buffer, so without DMA it only sustains reception at modest baud rates (9600 is
-//! safe on the 21 MHz reset clock, 115200 overruns). LPUART2 reaches the NVIC through
-//! [INTMUX0](crate::intmux), so its handler is bound to `INTMUX0_0`.
+//! on `RDRF`, one interrupt per received byte. With DMA channels ([`Lpuart::new_with_dma`]) whole
+//! buffers move without per-byte interrupts instead. LPUART0 and LPUART1 have 8-byte FIFOs;
+//! LPUART2 has a single buffer, so in interrupt mode it only sustains reception at modest baud
+//! rates (9600 is safe on the 21 MHz reset clock, 115200 overruns), while with DMA it keeps up.
+//! LPUART2 reaches the NVIC through [INTMUX0](crate::intmux), so its handler is bound to
+//! `INTMUX0_0`.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -25,6 +27,7 @@ use crate::pac::port::regs::Pcr;
 use crate::pac::SIM;
 use crate::pac::lpuart::regs::{Data, Stat};
 use crate::pac::port::vals::Mux;
+use crate::dma::{AnyChannel, Channel};
 use crate::pac::sim::vals::Lpuartsrc;
 use crate::{Async, Blocking, Mode};
 
@@ -44,6 +47,8 @@ pub enum Error {
     Framing,
     /// The receiver detected noise on the line.
     Noise,
+    /// The DMA controller reported an error moving the data.
+    Dma,
 }
 
 impl embedded_io::Error for Error {
@@ -53,6 +58,7 @@ impl embedded_io::Error for Error {
             Error::Parity => ErrorKind::InvalidData,
             Error::Framing => ErrorKind::InvalidData,
             Error::Noise => ErrorKind::Other,
+            Error::Dma => ErrorKind::Other,
         }
     }
 }
@@ -146,6 +152,7 @@ pub struct Lpuart<'d, M: Mode> {
 pub struct LpuartTx<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
+    dma: Option<(Peri<'d, AnyChannel>, u8)>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -153,6 +160,7 @@ pub struct LpuartTx<'d, M: Mode> {
 pub struct LpuartRx<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
+    dma: Option<(Peri<'d, AnyChannel>, u8)>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -260,10 +268,11 @@ fn tx_fifo_size(regs: Regs) -> u8 {
 }
 
 impl<'d, M: Mode> LpuartTx<'d, M> {
-    fn new_inner<T: Instance>() -> Self {
+    fn new_inner<T: Instance>(dma: Option<(Peri<'d, AnyChannel>, u8)>) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
+            dma,
             _phantom: PhantomData,
         }
     }
@@ -297,7 +306,7 @@ impl<'d> LpuartTx<'d, Blocking> {
     /// Create a transmit-only blocking driver.
     pub fn new_blocking<T: Instance>(_peri: Peri<'d, T>, tx: Peri<'d, impl TxPin<T>>, config: Config) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), None, &config);
-        Self::new_inner::<T>()
+        Self::new_inner::<T>(None)
     }
 }
 
@@ -311,12 +320,38 @@ impl<'d> LpuartTx<'d, Async> {
     ) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), None, &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>()
+        Self::new_inner::<T>(None)
     }
 
-    /// Write all bytes, waiting on the TX FIFO interrupt while it is full.
+    /// Create a transmit-only async driver that moves data with a DMA channel.
+    pub fn new_with_dma<T: InterruptInstance>(
+        _peri: Peri<'d, T>,
+        tx: Peri<'d, impl TxPin<T>>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>>,
+        tx_dma: Peri<'d, impl Channel>,
+        config: Config,
+    ) -> Self {
+        init::<T>(Some((tx.pcr(), tx.alt())), None, &config);
+        enable_interrupt::<T>();
+        Self::new_inner::<T>(Some((tx_dma.into(), T::TX_DMA_REQUEST)))
+    }
+
+    /// Write all bytes: through the DMA channel if one was given, otherwise waiting on the TX
+    /// FIFO interrupt while it is full.
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let regs = self.info.regs;
+
+        if let Some((channel, request)) = &mut self.dma {
+            if buffer.is_empty() {
+                return Ok(());
+            }
+            regs.baud().modify(|w| w.set_tdmae(true));
+            let transfer = unsafe { crate::dma::write(channel.reborrow(), *request, buffer, regs.data().as_ptr() as *mut u8) };
+            let result = transfer.await;
+            regs.baud().modify(|w| w.set_tdmae(false));
+            return result.map_err(|_| Error::Dma);
+        }
+
         let size = tx_fifo_size(regs);
         let mut written = 0;
 
@@ -364,10 +399,11 @@ impl<'d> LpuartTx<'d, Async> {
 }
 
 impl<'d, M: Mode> LpuartRx<'d, M> {
-    fn new_inner<T: Instance>() -> Self {
+    fn new_inner<T: Instance>(dma: Option<(Peri<'d, AnyChannel>, u8)>) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
+            dma,
             _phantom: PhantomData,
         }
     }
@@ -426,7 +462,7 @@ impl<'d> LpuartRx<'d, Blocking> {
     /// Create a receive-only blocking driver.
     pub fn new_blocking<T: Instance>(_peri: Peri<'d, T>, rx: Peri<'d, impl RxPin<T>>, config: Config) -> Self {
         init::<T>(None, Some((rx.pcr(), rx.alt())), &config);
-        Self::new_inner::<T>()
+        Self::new_inner::<T>(None)
     }
 }
 
@@ -440,12 +476,67 @@ impl<'d> LpuartRx<'d, Async> {
     ) -> Self {
         init::<T>(None, Some((rx.pcr(), rx.alt())), &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>()
+        Self::new_inner::<T>(None)
     }
 
-    /// Fill the buffer, waiting on the RX interrupt for each byte.
+    /// Create a receive-only async driver that moves data with a DMA channel.
+    pub fn new_with_dma<T: InterruptInstance>(
+        _peri: Peri<'d, T>,
+        rx: Peri<'d, impl RxPin<T>>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>>,
+        rx_dma: Peri<'d, impl Channel>,
+        config: Config,
+    ) -> Self {
+        init::<T>(None, Some((rx.pcr(), rx.alt())), &config);
+        enable_interrupt::<T>();
+        Self::new_inner::<T>(Some((rx_dma.into(), T::RX_DMA_REQUEST)))
+    }
+
+    /// Fill the buffer: through the DMA channel if one was given, otherwise waiting on the RX
+    /// interrupt for each byte. With DMA the per-character error flags are not available, so
+    /// receive errors are reported from the status register once the buffer is full.
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         let regs = self.info.regs;
+
+        if let Some((channel, request)) = &mut self.dma {
+            if buffer.is_empty() {
+                return Ok(());
+            }
+            clear_stat(regs, |s| {
+                s.set_or(true);
+                s.set_fe(true);
+                s.set_pf(true);
+                s.set_nf(true);
+            });
+            regs.baud().modify(|w| w.set_rdmae(true));
+            let transfer = unsafe { crate::dma::read(channel.reborrow(), *request, regs.data().as_ptr() as *const u8, buffer) };
+            let result = transfer.await;
+            regs.baud().modify(|w| w.set_rdmae(false));
+            result.map_err(|_| Error::Dma)?;
+            let stat = regs.stat().read();
+            let error = if stat.or() {
+                Some(Error::Overrun)
+            } else if stat.fe() {
+                Some(Error::Framing)
+            } else if stat.pf() {
+                Some(Error::Parity)
+            } else if stat.nf() {
+                Some(Error::Noise)
+            } else {
+                None
+            };
+            if let Some(e) = error {
+                clear_stat(regs, |s| {
+                    s.set_or(true);
+                    s.set_fe(true);
+                    s.set_pf(true);
+                    s.set_nf(true);
+                });
+                return Err(e);
+            }
+            return Ok(());
+        }
+
         let mut filled = 0;
 
         while filled < buffer.len() {
@@ -540,8 +631,8 @@ impl<'d> Lpuart<'d, Blocking> {
     ) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), Some((rx.pcr(), rx.alt())), &config);
         Self {
-            tx: LpuartTx::new_inner::<T>(),
-            rx: LpuartRx::new_inner::<T>(),
+            tx: LpuartTx::new_inner::<T>(None),
+            rx: LpuartRx::new_inner::<T>(None),
         }
     }
 }
@@ -558,8 +649,26 @@ impl<'d> Lpuart<'d, Async> {
         init::<T>(Some((tx.pcr(), tx.alt())), Some((rx.pcr(), rx.alt())), &config);
         enable_interrupt::<T>();
         Self {
-            tx: LpuartTx::new_inner::<T>(),
-            rx: LpuartRx::new_inner::<T>(),
+            tx: LpuartTx::new_inner::<T>(None),
+            rx: LpuartRx::new_inner::<T>(None),
+        }
+    }
+
+    /// Create an async driver that moves data with DMA channels, one per direction.
+    pub fn new_with_dma<T: InterruptInstance>(
+        _peri: Peri<'d, T>,
+        tx: Peri<'d, impl TxPin<T>>,
+        rx: Peri<'d, impl RxPin<T>>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>>,
+        tx_dma: Peri<'d, impl Channel>,
+        rx_dma: Peri<'d, impl Channel>,
+        config: Config,
+    ) -> Self {
+        init::<T>(Some((tx.pcr(), tx.alt())), Some((rx.pcr(), rx.alt())), &config);
+        enable_interrupt::<T>();
+        Self {
+            tx: LpuartTx::new_inner::<T>(Some((tx_dma.into(), T::TX_DMA_REQUEST))),
+            rx: LpuartRx::new_inner::<T>(Some((rx_dma.into(), T::RX_DMA_REQUEST))),
         }
     }
 
@@ -672,6 +781,10 @@ impl<'d> embedded_io::Read for Lpuart<'d, Blocking> {
 }
 
 pub(crate) trait SealedInstance {
+    /// DMAMUX request source for received data.
+    const RX_DMA_REQUEST: u8;
+    /// DMAMUX request source for transmit data.
+    const TX_DMA_REQUEST: u8;
     fn info() -> &'static Info;
     fn state() -> &'static State;
     fn enable_clock();
@@ -691,8 +804,11 @@ pub trait InterruptInstance: Instance {
 }
 
 macro_rules! impl_lpuart_instance {
-    ($inst:ident) => {
+    ($inst:ident, $rx_request:expr, $tx_request:expr) => {
         impl crate::lpuart::SealedInstance for crate::peripherals::$inst {
+            const RX_DMA_REQUEST: u8 = $rx_request;
+            const TX_DMA_REQUEST: u8 = $tx_request;
+
             fn info() -> &'static crate::lpuart::Info {
                 static INFO: crate::lpuart::Info = crate::lpuart::Info {
                     regs: crate::pac::$inst,

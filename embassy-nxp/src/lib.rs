@@ -8,7 +8,7 @@ pub(crate) mod fmt;
 pub mod adc;
 #[cfg(kinetis)]
 pub mod clocks;
-#[cfg(lpc55)]
+#[cfg(any(lpc55, kinetis))]
 pub mod dma;
 pub mod gpio;
 #[cfg(kinetis)]
@@ -183,7 +183,7 @@ pub fn init(_config: config::Config) -> Peripherals {
     #[cfg(feature = "_time_driver")]
     time_driver::init();
 
-    #[cfg(lpc55)]
+    #[cfg(any(lpc55, kinetis))]
     dma::init();
 
     peripherals

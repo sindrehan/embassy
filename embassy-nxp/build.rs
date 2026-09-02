@@ -325,7 +325,6 @@ fn impl_gpio_pin(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
-#[cfg(not(feature = "_kinetis"))]
 fn impl_dma_channel(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
 
@@ -549,9 +548,19 @@ fn interrupt_args(peripheral: &Peripheral) -> Option<TokenStream> {
 #[cfg(feature = "_kinetis")]
 fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
+    let request = |suffix: &str| {
+        let name = format!("{}{}", peripheral.name, suffix);
+        let dma = peripheral
+            .dma_muxing
+            .iter()
+            .find(|d| d.signal == name)
+            .unwrap_or_else(|| panic!("{} has no DMA request", name));
+        Literal::u8_unsuffixed(dma.request)
+    };
+    let (rx_request, tx_request) = (request("Rx"), request("Tx"));
 
     impls.push(quote! {
-        impl_lpuart_instance!(#instance);
+        impl_lpuart_instance!(#instance, #rx_request, #tx_request);
     });
 
     if let Some(args) = interrupt_args(peripheral) {
@@ -656,6 +665,11 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
 
         if peripheral.name.starts_with("GPIO") {
             impl_gpio_pin(&mut impls, peripheral);
+        }
+
+        #[cfg(feature = "_kinetis")]
+        if dma_instance(peripheral.name).is_some() {
+            impl_dma_channel(&mut impls, peripheral);
         }
 
         #[cfg(feature = "_kinetis")]
