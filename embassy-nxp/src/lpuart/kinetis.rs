@@ -4,8 +4,10 @@
 //! [`init`](crate::init) selects, so baud rates do not depend on the core clock configuration.
 //!
 //! The async API is interrupt driven: TX refills the FIFO from the `TDRE` interrupt and RX wakes
-//! on `RDRF`, one interrupt per received byte. LPUART2 only reaches the NVIC through the
-//! interrupt multiplexer, which is not supported yet, so it is blocking only.
+//! on `RDRF`, one interrupt per received byte. LPUART0 and LPUART1 have 8-byte FIFOs; LPUART2
+//! has a single buffer, so without DMA it only sustains reception at modest baud rates (9600 is
+//! safe on the 21 MHz reset clock, 115200 overruns). LPUART2 reaches the NVIC through
+//! [INTMUX0](crate::intmux), so its handler is bound to `INTMUX0_0`.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -484,6 +486,9 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
 }
 
 fn enable_interrupt<T: InterruptInstance>() {
+    if let Some(source) = T::INTMUX_SOURCE {
+        crate::intmux::enable_source(crate::intmux::CHANNEL, source);
+    }
     T::Interrupt::unpend();
     unsafe { T::Interrupt::enable() };
 }
@@ -495,6 +500,11 @@ pub struct InterruptHandler<T: InterruptInstance> {
 
 impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
+        // On a shared INTMUX line this runs for other peripherals' interrupts too, possibly
+        // before this instance exists; its registers bus-fault while the clock gate is closed.
+        if T::INTMUX_SOURCE.is_some() && !T::clock_enabled() {
+            return;
+        }
         let regs = T::info().regs;
         let state = T::state();
         let stat = regs.stat().read();
@@ -665,16 +675,19 @@ pub(crate) trait SealedInstance {
     fn info() -> &'static Info;
     fn state() -> &'static State;
     fn enable_clock();
+    fn clock_enabled() -> bool;
 }
 
 /// An LPUART instance.
 #[allow(private_bounds)]
 pub trait Instance: SealedInstance + PeripheralType {}
 
-/// An LPUART instance with an NVIC interrupt, usable in async mode.
+/// An LPUART instance that can raise an interrupt, usable in async mode.
 pub trait InterruptInstance: Instance {
-    /// Interrupt for this instance.
+    /// NVIC interrupt for this instance: its own line, or the INTMUX channel it is routed through.
     type Interrupt: Interrupt;
+    /// Input number on INTMUX0 for instances without an NVIC line of their own.
+    const INTMUX_SOURCE: Option<u8> = None;
 }
 
 macro_rules! impl_lpuart_instance {
@@ -695,6 +708,10 @@ macro_rules! impl_lpuart_instance {
             fn enable_clock() {
                 crate::clocks::enable::<crate::peripherals::$inst>();
             }
+
+            fn clock_enabled() -> bool {
+                crate::clocks::is_enabled::<crate::peripherals::$inst>()
+            }
         }
 
         impl crate::lpuart::Instance for crate::peripherals::$inst {}
@@ -705,6 +722,12 @@ macro_rules! impl_lpuart_interrupt {
     ($inst:ident, $irq:ident) => {
         impl crate::lpuart::InterruptInstance for crate::peripherals::$inst {
             type Interrupt = crate::interrupt::typelevel::$irq;
+        }
+    };
+    ($inst:ident, $irq:ident, $source:expr) => {
+        impl crate::lpuart::InterruptInstance for crate::peripherals::$inst {
+            type Interrupt = crate::interrupt::typelevel::$irq;
+            const INTMUX_SOURCE: Option<u8> = Some($source);
         }
     };
 }

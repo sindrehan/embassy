@@ -504,7 +504,44 @@ fn impl_clock_gate(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     });
 }
 
-/// Kinetis LPUART: instance, NVIC interrupt when it has one (LPUART2 sits behind INTMUX), pins.
+/// INTMUX0 inputs of the peripherals without an NVIC line of their own (MKL82Z7 reference
+/// manual table 3-3; the input number is the SDK's IRQn minus 32). Routed through channel 0.
+#[cfg(feature = "_kinetis")]
+const INTMUX_SOURCES: &[(&str, u8)] = &[
+    ("LPTMR1", 0),
+    ("SPI1", 4),
+    ("LPUART2", 5),
+    ("EMVSIM1", 6),
+    ("I2C1", 7),
+    ("TSI0", 8),
+    ("PMC", 9),
+    ("FTFA", 10),
+    ("MCG", 11),
+    ("WDOG", 12),
+    ("DAC0", 13),
+    ("TRNG0", 14),
+    ("CMP0", 16),
+];
+
+/// The tokens for a driver's `impl_*_interrupt!` invocation: the peripheral's own NVIC line, or
+/// the INTMUX channel line plus the source number, or nothing.
+#[cfg(feature = "_kinetis")]
+fn interrupt_args(peripheral: &Peripheral) -> Option<TokenStream> {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+    if METADATA.interrupts.iter().any(|(name, _)| *name == peripheral.name) {
+        return Some(quote! { #instance, #instance });
+    }
+    INTMUX_SOURCES
+        .iter()
+        .find(|(name, _)| *name == peripheral.name)
+        .map(|(_, source)| {
+            let channel = format_ident!("INTMUX0_0");
+            let source = Literal::u8_unsuffixed(*source);
+            quote! { #instance, #channel, #source }
+        })
+}
+
+/// Kinetis LPUART: instance, interrupt (own NVIC line or INTMUX channel), pins.
 #[cfg(feature = "_kinetis")]
 fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
@@ -513,9 +550,9 @@ fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
         impl_lpuart_instance!(#instance);
     });
 
-    if METADATA.interrupts.iter().any(|(name, _)| *name == peripheral.name) {
+    if let Some(args) = interrupt_args(peripheral) {
         impls.push(quote! {
-            impl_lpuart_interrupt!(#instance, #instance);
+            impl_lpuart_interrupt!(#args);
         });
     }
 
@@ -536,7 +573,7 @@ fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
-/// Kinetis I2C: instance, NVIC interrupt when it has one (I2C1 sits behind INTMUX), pins.
+/// Kinetis I2C: instance, interrupt (own NVIC line or INTMUX channel), pins.
 #[cfg(feature = "_kinetis")]
 fn impl_i2c(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
@@ -545,9 +582,9 @@ fn impl_i2c(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
         impl_i2c_instance!(#instance);
     });
 
-    if METADATA.interrupts.iter().any(|(name, _)| *name == peripheral.name) {
+    if let Some(args) = interrupt_args(peripheral) {
         impls.push(quote! {
-            impl_i2c_interrupt!(#instance, #instance);
+            impl_i2c_interrupt!(#args);
         });
     }
 

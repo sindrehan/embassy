@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 ## Unreleased - ReleaseDate
-- MKL82Z7 (Kinetis KL82): chip support with clock gating (`clocks`), GPIO, watchdog disable, a TPM time driver (`time-driver-tpm`) system clock configuration (FEI, PLL, BLPI) an LPUART driver and an I2C master driver (both blocking and async)
+- MKL82Z7 (Kinetis KL82): chip support with clock gating (`clocks`), GPIO, watchdog disable, a TPM time driver (`time-driver-tpm`) system clock configuration (FEI, PLL, BLPI) an LPUART driver and an I2C master driver (both blocking and async, INTMUX0 for the instances without an NVIC line)
 - LPC55: blocking version of SPI
 - Codegen using `nxp-pac` metadata
 - LPC55: PWM simple

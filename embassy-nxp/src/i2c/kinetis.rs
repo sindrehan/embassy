@@ -4,8 +4,8 @@
 //! state machine that waits for the per-byte `IICIF` flag: the async driver sleeps on the
 //! interrupt, the blocking one busy-polls the same future with [`embassy_futures::block_on`].
 //!
-//! I2C1 only reaches the NVIC through the interrupt multiplexer, which is not supported yet, so
-//! it is blocking only. There are no timeouts: a slave holding the bus stalls the transfer.
+//! I2C1 reaches the NVIC through [INTMUX0](crate::intmux), so its handler is bound to
+//! `INTMUX0_0`. There are no timeouts: a slave holding the bus stalls the transfer.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -194,6 +194,9 @@ impl<'d> I2c<'d, Async> {
         config: Config,
     ) -> Self {
         init::<T>((scl.pcr(), scl.alt()), (sda.pcr(), sda.alt()), &config);
+        if let Some(source) = T::INTMUX_SOURCE {
+            crate::intmux::enable_source(crate::intmux::CHANNEL, source);
+        }
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
         Self {
@@ -427,6 +430,11 @@ pub struct InterruptHandler<T: InterruptInstance> {
 
 impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
+        // On a shared INTMUX line this runs for other peripherals' interrupts too, possibly
+        // before this instance exists; its registers bus-fault while the clock gate is closed.
+        if T::INTMUX_SOURCE.is_some() && !T::clock_enabled() {
+            return;
+        }
         let regs = T::info().regs;
         if regs.c1().read().iicie() && regs.s().read().iicif() {
             // The thread side only touches C1 inside a critical section, so this cannot race.
@@ -473,16 +481,19 @@ pub(crate) trait SealedInstance {
     fn info() -> &'static Info;
     fn state() -> &'static State;
     fn enable_clock();
+    fn clock_enabled() -> bool;
 }
 
 /// An I2C instance.
 #[allow(private_bounds)]
 pub trait Instance: SealedInstance + PeripheralType {}
 
-/// An I2C instance with an NVIC interrupt, usable in async mode.
+/// An I2C instance that can raise an interrupt, usable in async mode.
 pub trait InterruptInstance: Instance {
-    /// Interrupt for this instance.
+    /// NVIC interrupt for this instance: its own line, or the INTMUX channel it is routed through.
     type Interrupt: Interrupt;
+    /// Input number on INTMUX0 for instances without an NVIC line of their own.
+    const INTMUX_SOURCE: Option<u8> = None;
 }
 
 macro_rules! impl_i2c_instance {
@@ -503,6 +514,10 @@ macro_rules! impl_i2c_instance {
             fn enable_clock() {
                 crate::clocks::enable::<crate::peripherals::$inst>();
             }
+
+            fn clock_enabled() -> bool {
+                crate::clocks::is_enabled::<crate::peripherals::$inst>()
+            }
         }
 
         impl crate::i2c::Instance for crate::peripherals::$inst {}
@@ -513,6 +528,12 @@ macro_rules! impl_i2c_interrupt {
     ($inst:ident, $irq:ident) => {
         impl crate::i2c::InterruptInstance for crate::peripherals::$inst {
             type Interrupt = crate::interrupt::typelevel::$irq;
+        }
+    };
+    ($inst:ident, $irq:ident, $source:expr) => {
+        impl crate::i2c::InterruptInstance for crate::peripherals::$inst {
+            type Interrupt = crate::interrupt::typelevel::$irq;
+            const INTMUX_SOURCE: Option<u8> = Some($source);
         }
     };
 }

@@ -14,6 +14,8 @@ pub mod gpio;
 #[cfg(kinetis)]
 pub mod i2c;
 #[cfg(kinetis)]
+pub mod intmux;
+#[cfg(kinetis)]
 pub mod lpuart;
 #[cfg(lpc55)]
 pub mod pint;
