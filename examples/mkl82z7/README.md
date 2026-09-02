@@ -97,16 +97,12 @@ fails instead of hanging.
 - **RAM starts at 0x1FFFA000.** SRAM_L and SRAM_U are contiguous 96 KiB.
 - **Recovering a reset-looping or secured chip.** While the chip keeps
   resetting (for example firmware that forgot the watchdog, or a loop of
-  software resets) the AHB-AP answers FAULT and a plain `cargo run` cannot
-  connect. probe-rs's KL82 sequence handles this through the MDM-AP, which
-  stays reachable: `probe-rs erase` holds the system in reset and mass erases
-  the flash (this also unlocks a secured part), and the next flash clears the
-  ROM's sticky FORCEROM flag so the new firmware boots. No J-Link needed:
-
-  ```sh
-  probe-rs erase --chip MKL82Z128VLK7 --protocol swd
-  cargo run --bin hello
-  ```
+  software resets) the AHB-AP answers FAULT. probe-rs's KL82 sequence notices
+  this during attach and recovers through the MDM-AP, which stays reachable, so
+  a plain `cargo run` reflashes it. A secured part is unlocked the same way by
+  `probe-rs erase --chip MKL82Z128VLK7 --protocol swd`, which mass erases the
+  flash; the next flash clears the ROM's sticky FORCEROM flag so the new
+  firmware boots. No J-Link needed.
 
 ## FRDM-KL82Z board
 
