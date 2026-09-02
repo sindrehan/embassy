@@ -38,6 +38,14 @@ then exits. LPUART2 has no NVIC vector of its own; it reaches the core through
 INTMUX0 channel 0, so its handler binds to `INTMUX0_0` (see `intmux`). It also
 has only a 1-byte receive buffer, so without DMA keep it to modest baud rates.
 
+## DMA
+
+`lpuart_dma` moves LPUART data with eDMA channels (`Lpuart::new_with_dma`,
+one channel per direction, any of `DMA_CH0` to `DMA_CH7`): LPUART2, whose
+1-byte FIFO overruns at 115200 in interrupt mode, runs 256 bytes at 115200 at
+wire speed, then LPUART0 does 1024 bytes at 1 Mbaud, both through internal
+loopback. The DMA interrupts belong to the HAL; nothing needs binding.
+
 ## I2C
 
 `i2c_accel` reads the on-board FXOS8700CQ accelerometer over I2C0 (PTD2 SCL,
