@@ -80,6 +80,9 @@ fn singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
         // GPIO and DMA are generated in a 2nd pass.
         let skip_singleton = peripheral.name.starts_with("GPIO") || dma_instance(peripheral.name).is_some();
 
+        // The Kinetis time driver owns TPM0.
+        let skip_singleton = skip_singleton || (cfg!(feature = "time-driver-tpm") && peripheral.name == "TPM0");
+
         if !skip_singleton {
             singletons.push(Singleton {
                 name: peripheral.name.into(),
