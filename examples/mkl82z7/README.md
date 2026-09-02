@@ -25,8 +25,10 @@ benchmark, which runs about 3.4 times faster on the PLL (72 over 21 MHz).
 
 `serial` echoes on LPUART0 (PTB17 TX, PTB16 RX, 115200 8N1), which the board
 routes to the OpenSDA virtual COM port and to Arduino D1/D0. The J-Link OpenSDA
-firmware enumerates a CDC ACM interface; on Linux it only shows up as
-`/dev/ttyACM0` after `sudo modprobe cdc_acm`. For an external 3.3 V adapter
+firmware enumerates a CDC ACM interface, `/dev/ttyACM0` on Linux (it needs the
+`cdc_acm` module, which is missing until a reboot after a kernel update). A
+quick check with pyserial at 115200: a `heartbeat N` line arrives every second
+and anything sent comes back. For an external 3.3 V adapter
 use LPUART1 on PTC4 (TX, Arduino D10 / J2 pin 6) and PTC3 (RX, Arduino D6 /
 J1 pin 14) instead; the example says which two lines to change.
 
