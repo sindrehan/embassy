@@ -15,6 +15,12 @@ clocks are opened with `embassy_nxp::clocks::enable::<peripherals::X>()`. The
 `time-driver-tpm` feature runs `embassy-time` at 1 MHz from TPM0, clocked by the
 4 MHz fast internal reference, so it is independent of the core clock setup.
 
+`Config::clocks` selects the system clocks. `hello` stays on the reset
+configuration (FLL from the slow internal reference, 21 MHz core). `blinky`
+uses `ClockConfig::pll` with the board's 12 MHz crystal: PLL at 144 MHz, 72 MHz
+core, 24 MHz bus and flash. Both print the resulting clocks and a busy-loop
+benchmark, which runs about 3.4 times faster on the PLL (72 over 21 MHz).
+
 ## Chip quirks handled here
 
 - **Flash configuration field at 0x400..0x40F.** `memory.x` places the

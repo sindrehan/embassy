@@ -25,6 +25,19 @@ pub static FLASH_CONFIG: [u8; 16] = [
     0xFF, 0xFF,
 ];
 
+/// Runs a fixed busy loop and returns how long it took in microseconds, as
+/// measured by `embassy-time`. The time driver runs from the internal
+/// reference clock, so the result scales with the core clock: about 3.4 times
+/// shorter at 72 MHz than on the 21 MHz reset configuration.
+#[inline(never)]
+pub fn spin_benchmark() -> u64 {
+    let start = embassy_time::Instant::now();
+    for _ in 0..200_000u32 {
+        cortex_m::asm::nop();
+    }
+    start.elapsed().as_micros()
+}
+
 /// Terminates the `probe-rs run` session with a success exit code.
 ///
 /// Only meaningful with a debugger attached; without one the semihosting

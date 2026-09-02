@@ -1,10 +1,11 @@
-//! Prints chip identification registers over RTT and exits.
+//! Prints chip identification and clock registers over RTT, on the reset
+//! clock configuration (FEI, 21 MHz), and exits.
 #![no_std]
 #![no_main]
 
 use cortex_m_rt::entry;
 use embassy_nxp::pac::{MCG, RCM, SIM};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_examples::{self as _, spin_benchmark};
 
 #[entry]
 fn main() -> ! {
@@ -37,11 +38,15 @@ fn main() -> ! {
         RCM.srs1().read().0
     );
     defmt::info!(
-        "MCG: C1 = {:#04x} C2 = {:#04x} S = {:#04x}",
+        "MCG: C1 = {:#04x} C2 = {:#04x} C5 = {:#04x} C6 = {:#04x} S = {:#04x}",
         MCG.c1().read().0,
         MCG.c2().read().0,
+        MCG.c5().read().0,
+        MCG.c6().read().0,
         MCG.s().read().0
     );
+    defmt::info!("clocks: {:?}", embassy_nxp::clocks::clocks());
+    defmt::info!("spin benchmark: {} us", spin_benchmark());
 
     embassy_nxp_mkl82z7_examples::exit()
 }
