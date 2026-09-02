@@ -1,7 +1,8 @@
 //! LPUART driver for Kinetis.
 //!
 //! All LPUART instances are clocked from the 48 MHz IRC48M through `SIM_SOPT2[PLLFLLSEL]`, which
-//! [`init`](crate::init) selects, so baud rates do not depend on the core clock configuration.
+//! [`init`](crate::init) selects (the 4 MHz fast IRC in VLPR), so baud rates do not depend on the
+//! core clock configuration.
 //!
 //! The async API is interrupt driven: TX refills the FIFO from the `TDRE` interrupt and RX wakes
 //! on `RDRF`, one interrupt per received byte. With DMA channels ([`Lpuart::new_with_dma`]) whole
@@ -28,7 +29,6 @@ use crate::pac::SIM;
 use crate::pac::lpuart::regs::{Data, Stat};
 use crate::pac::port::vals::Mux;
 use crate::dma::{AnyChannel, Channel};
-use crate::pac::sim::vals::Lpuartsrc;
 use crate::{Async, Blocking, Mode};
 
 /// Write-1-to-clear flags in STAT: LBKDIF, RXEDGIF, IDLE, OR, NF, FE, PF, MA1F, MA2F.
@@ -195,11 +195,12 @@ fn baud_divisors(src: u32, baudrate: u32) -> Option<(u8, u16)> {
 fn init<T: Instance>(tx: Option<(Reg<Pcr, RW>, Mux)>, rx: Option<(Reg<Pcr, RW>, Mux)>, config: &Config) {
     let regs = T::info().regs;
 
-    // All LPUARTs share the clock select: the PLLFLLSEL clock, which `clocks::init` points at the
-    // 48 MHz IRC48M.
-    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_lpuartsrc(Lpuartsrc::_01)));
+    // All LPUARTs share the clock select: the 48 MHz IRC48M through PLLFLLSEL, or the 4 MHz
+    // fast IRC in VLPR.
+    let source = crate::clocks::lpuart_source();
+    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_lpuartsrc(source)));
     T::enable_clock();
-    let src = crate::clocks::clocks().pllfll;
+    let src = crate::clocks::clocks().lpuart;
 
     let (osr, sbr) = match baud_divisors(src, config.baudrate) {
         Some(divisors) => divisors,

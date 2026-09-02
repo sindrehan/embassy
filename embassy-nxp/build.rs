@@ -673,6 +673,25 @@ fn impl_i2c(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
+/// Kinetis LLWU: (bank, pin, LLWU input) for every wakeup capable pin, from the LLWU signals.
+#[cfg(feature = "_kinetis")]
+fn llwu_pins(peripheral: &Peripheral) -> TokenStream {
+    let entries = peripheral.signals.iter().flat_map(|signal| {
+        let input = signal.name.strip_prefix("P").unwrap().parse::<u8>().unwrap();
+        signal.pins.iter().map(move |pin| {
+            let name = pin.pin;
+            let bank = format_ident!("Gpio{}", &name[2..3]);
+            let number = name[3..].parse::<u8>().unwrap();
+            let number = Literal::u8_unsuffixed(number);
+            let input = Literal::u8_unsuffixed(input);
+            quote! { (crate::gpio::Bank::#bank, #number, #input) }
+        })
+    });
+    quote! {
+        pub(crate) const LLWU_PINS: &[(crate::gpio::Bank, u8, u8)] = &[#(#entries),*];
+    }
+}
+
 fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> TokenStream {
     let mut impls = Vec::new();
 
@@ -702,6 +721,10 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
 
             if peripheral.name.starts_with("SPI") {
                 impl_dspi(&mut impls, peripheral);
+            }
+
+            if peripheral.name == "LLWU" {
+                impls.push(llwu_pins(peripheral));
             }
         }
 

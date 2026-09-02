@@ -70,7 +70,7 @@ use core::cell::Cell;
 use critical_section::Mutex;
 
 use crate::pac::mcg::vals::{Clks, Clkst, DrstDrs, Fcrdiv, Frdiv, Range};
-use crate::pac::sim::vals::{Outdiv1, Outdiv2, Outdiv4, Outdiv5, Pllfllsel};
+use crate::pac::sim::vals::{Lpuartsrc, Outdiv1, Outdiv2, Outdiv4, Outdiv5, Pllfllsel};
 use crate::pac::smc::vals::Runm;
 use crate::pac::{MCG, OSC, SIM, SMC};
 
@@ -87,6 +87,22 @@ const HSRUN_MAX_CORE_HZ: u32 = 96_000_000;
 const MAX_BUS_HZ: u32 = 24_000_000;
 /// 48 MHz internal reference, selected as the PLLFLLSEL peripheral clock.
 const IRC48M_HZ: u32 = 48_000_000;
+/// Limits in VLPR.
+const VLPR_MAX_CORE_HZ: u32 = 4_000_000;
+const VLPR_MAX_FLASH_HZ: u32 = 1_000_000;
+
+/// The run mode the chip settles in after `init`. HSRUN is implied by a core clock above 72 MHz.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum RunMode {
+    /// Normal run (or high speed run above 72 MHz core).
+    #[default]
+    Run,
+    /// Very low power run: needs [`McgMode::Blpi`], core and bus at most 4 MHz, flash at most
+    /// 1 MHz. The 48 MHz IRC is off, so LPUART runs from the 4 MHz IRC. See
+    /// [`ClockConfig::vlpr`].
+    VeryLowPower,
+}
 
 /// The source of the external reference clock on `EXTAL0`/`XTAL0`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +167,8 @@ pub struct ClockConfig {
     pub flash_div: u8,
     /// QuadSPI clock divider (`OUTDIV5`), 1 to 16.
     pub qspi_div: u8,
+    /// Run mode to settle in.
+    pub run_mode: RunMode,
 }
 
 impl Default for ClockConfig {
@@ -162,6 +180,7 @@ impl Default for ClockConfig {
             bus_div: 1,
             flash_div: 2,
             qspi_div: 1,
+            run_mode: RunMode::Run,
         }
     }
 }
@@ -189,6 +208,19 @@ impl ClockConfig {
             bus_div,
             flash_div: bus_div,
             qspi_div: core_div,
+            run_mode: RunMode::Run,
+        }
+    }
+
+    /// Very low power run on the 4 MHz fast IRC: 4 MHz core and bus, 1 MHz flash.
+    pub const fn vlpr() -> Self {
+        Self {
+            mcg: McgMode::Blpi,
+            core_div: 1,
+            bus_div: 1,
+            flash_div: 4,
+            qspi_div: 1,
+            run_mode: RunMode::VeryLowPower,
         }
     }
 
@@ -204,13 +236,15 @@ impl ClockConfig {
     /// The clock frequencies this configuration produces.
     pub const fn clocks(&self) -> Clocks {
         let mcgout = self.mcgout_hz();
+        let vlpr = matches!(self.run_mode, RunMode::VeryLowPower);
         Clocks {
             mcgout,
             core: mcgout / self.core_div as u32,
             bus: mcgout / self.bus_div as u32,
             flash: mcgout / self.flash_div as u32,
             qspi: mcgout / self.qspi_div as u32,
-            pllfll: IRC48M_HZ,
+            pllfll: if vlpr { 0 } else { IRC48M_HZ },
+            lpuart: if vlpr { FAST_IRC_HZ } else { IRC48M_HZ },
         }
     }
 
@@ -232,6 +266,13 @@ impl ClockConfig {
             self.bus_div / self.core_div <= 8 && self.flash_div / self.core_div <= 8,
             "core to bus and core to flash ratios are limited to 8"
         );
+        if self.run_mode == RunMode::VeryLowPower {
+            assert!(self.mcg == McgMode::Blpi, "VLPR needs the BLPI clock mode");
+            assert!(
+                c.core <= VLPR_MAX_CORE_HZ && c.bus <= VLPR_MAX_CORE_HZ && c.flash <= VLPR_MAX_FLASH_HZ,
+                "VLPR allows at most 4 MHz core and bus and 1 MHz flash"
+            );
+        }
         if let McgMode::Pee { external, prdiv, vdiv } = self.mcg {
             assert!((1..=8).contains(&prdiv), "prdiv must be 1 to 8");
             assert!((16..=47).contains(&vdiv), "vdiv must be 16 to 47");
@@ -264,9 +305,17 @@ pub struct Clocks {
     pub flash: u32,
     /// QuadSPI clock.
     pub qspi: u32,
-    /// The `SIM_SOPT2[PLLFLLSEL]` peripheral clock offered to LPUART, TPM, FlexIO, EMVSIM and
-    /// USB. `init` points it at the 48 MHz IRC48M.
+    /// The `SIM_SOPT2[PLLFLLSEL]` peripheral clock offered to TPM, FlexIO, EMVSIM and USB.
+    /// `init` points it at the 48 MHz IRC48M, or leaves it off (0) in VLPR where that IRC is
+    /// not allowed.
     pub pllfll: u32,
+    /// The LPUART module clock: the 48 MHz IRC48M, or the 4 MHz fast IRC in VLPR.
+    pub lpuart: u32,
+}
+
+/// The `SIM_SOPT2[LPUARTSRC]` selection matching [`Clocks::lpuart`].
+pub(crate) fn lpuart_source() -> Lpuartsrc {
+    if clocks().pllfll == 0 { Lpuartsrc::_11 } else { Lpuartsrc::_01 }
 }
 
 static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {
@@ -276,6 +325,7 @@ static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {
     flash: 0,
     qspi: 0,
     pllfll: 0,
+    lpuart: 0,
 }));
 
 /// The clock frequencies configured by [`init`](crate::init).
@@ -291,7 +341,7 @@ pub(crate) fn init(config: ClockConfig) {
     let high_speed = clocks.core > RUN_MAX_CORE_HZ;
 
     if high_speed {
-        SMC.pmprot().modify(|w| w.set_ahsrun(true));
+        // Mode protection was opened by power::init_protection.
         SMC.pmctrl().modify(|w| w.set_runm(Runm::_11));
         // PMSTAT: 0x80 = HSRUN.
         while SMC.pmstat().read().pmstat() != 0x80 {}
@@ -313,7 +363,9 @@ pub(crate) fn init(config: ClockConfig) {
     }
 
     // Selecting the IRC48M here also enables it. The fractional divider (CLKDIV3) is /1 at reset.
-    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_pllfllsel(Pllfllsel::_11)));
+    // VLPR forbids the IRC48M, so there the mux stays on the (disabled) FLL output.
+    let pllfllsel = if clocks.pllfll == 0 { Pllfllsel::_00 } else { Pllfllsel::_11 };
+    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_pllfllsel(pllfllsel)));
 
     critical_section::with(|cs| CLOCKS.borrow(cs).set(clocks));
     debug!("Clocks: {:?}", clocks);
@@ -414,6 +466,8 @@ fn enter_blpi() {
     MCG.c1().modify(|w| {
         w.set_clks(Clks::_01);
         w.set_irefs(true);
+        // MCGIRCLK for the peripherals (TPM, LPUART in VLPR).
+        w.set_irclken(true);
     });
     while !MCG.s().read().ircst() || MCG.s().read().clkst() != Clkst::_01 {}
     MCG.c2().modify(|w| w.set_lp(true));

@@ -17,6 +17,8 @@ pub mod i2c;
 pub mod intmux;
 #[cfg(kinetis)]
 pub mod lpuart;
+#[cfg(kinetis)]
+pub mod power;
 #[cfg(lpc55)]
 pub mod pint;
 #[cfg(lpc55)]
@@ -169,6 +171,9 @@ pub fn init(_config: config::Config) -> Peripherals {
     }
 
     #[cfg(kinetis)]
+    power::init_protection();
+
+    #[cfg(kinetis)]
     clocks::init(_config.clocks);
 
     #[cfg(any(lpc55, rt1xxx, kinetis))]
@@ -185,6 +190,11 @@ pub fn init(_config: config::Config) -> Peripherals {
 
     #[cfg(any(lpc55, kinetis))]
     dma::init();
+
+    // Last: VLPR forbids clock changes afterwards, and the idle sleep mode wants the final
+    // clock configuration.
+    #[cfg(kinetis)]
+    power::init(&_config.power, &_config.clocks);
 
     peripherals
 }
@@ -218,6 +228,9 @@ pub mod config {
         /// System clock configuration.
         #[cfg(kinetis)]
         pub clocks: crate::clocks::ClockConfig,
+        /// Power configuration.
+        #[cfg(kinetis)]
+        pub power: crate::power::Config,
     }
 }
 
