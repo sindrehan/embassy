@@ -3,12 +3,12 @@
 #![no_main]
 
 use cortex_m_rt::entry;
+use embassy_nxp::pac::{MCG, RCM, SIM};
 use embassy_nxp_mkl82z7_examples as _;
-use nxp_pac::{MCG, RCM, SIM};
 
 #[entry]
 fn main() -> ! {
-    embassy_nxp_mkl82z7_examples::init();
+    let _p = embassy_nxp::init(Default::default());
 
     let sdid = SIM.sdid().read();
     defmt::info!(

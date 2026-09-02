@@ -10,9 +10,9 @@ cargo run --bin blinky
 cargo run --bin hello
 ```
 
-These examples talk to the PAC directly. `embassy-nxp` cannot be used yet: its
-build script needs the nxp-pac `metadata` (pins, signals, clock gates), which
-does not exist for this chip so far.
+The examples go through `embassy-nxp` with the `mkl82z7` feature. The HAL
+disables the watchdog in `__pre_init`, `init` gates on the PORT clocks, and other peripheral
+clocks are opened with `embassy_nxp::clocks::enable::<peripherals::X>()`.
 
 ## Chip quirks handled here
 
@@ -21,8 +21,13 @@ does not exist for this chip so far.
   FOPT = 0x3D boot from flash) and starts `.text` at 0x410 so code never spills
   into it. FOPT = 0xFF would boot from the ROM bootloader; an FSEC other than
   0xFE secures the part.
-- **Watchdog runs out of reset** from the bus clock with roughly a 0.5 s
-  timeout. `init()` unlocks and disables it; every example calls it first.
+- **Watchdog runs out of reset** with roughly a 0.5 s timeout, and there is a
+  much tighter rule on top: after a debugger halts the core at the reset vector
+  and resumes it, the first unlock word must be written within the 256 bus cycle
+  watchdog configuration time or the chip resets (RM 28.4.2, "WCT"). Disabling
+  it from `main` is already too late, so `embassy-nxp` does it from
+  cortex-m-rt's `__pre_init` hook, before RAM initialisation. probe-rs exposes
+  this; J-Link hides it because it disables the watchdog itself after reset.
 - **RAM starts at 0x1FFFA000.** SRAM_L and SRAM_U are contiguous 96 KiB.
 - **Recovering a reset-looping chip.** probe-rs has no Kinetis MDM-AP debug
   sequence, so while the chip keeps resetting (for example firmware that forgot

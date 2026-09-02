@@ -13,6 +13,10 @@ MEMORY
    (see src/lib.rs) instead of letting .text spill into it. */
 _stext = ORIGIN(FLASH) + 0x410;
 
+/* Pull the crate's FLASH_CONFIG object into the link even though nothing
+   references it. */
+EXTERN(FLASH_CONFIG);
+
 SECTIONS
 {
   .flash_config ORIGIN(FLASH) + 0x400 :

@@ -2,10 +2,10 @@
 #![no_std]
 
 use defmt_rtt as _;
-use nxp_pac::WDOG;
 use panic_probe as _;
 
-/// Kinetis flash configuration field, placed at 0x400 by `memory.x`.
+/// Kinetis flash configuration field, placed at 0x400 by `memory.x`, which also
+/// forces this object into the link with `EXTERN(FLASH_CONFIG)`.
 ///
 /// Bytes 0..8: backdoor comparison key (unused).
 /// Bytes 8..12: FPROT3..FPROT0, 0xFF = no flash protection.
@@ -15,6 +15,7 @@ use panic_probe as _;
 ///          The reset value 0xFF would select the boot ROM instead of flash.
 /// Bytes 14..16: reserved.
 #[used]
+#[unsafe(no_mangle)]
 #[unsafe(link_section = ".flash_config")]
 pub static FLASH_CONFIG: [u8; 16] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // backdoor key
@@ -23,24 +24,6 @@ pub static FLASH_CONFIG: [u8; 16] = [
     0x3D, // FOPT
     0xFF, 0xFF,
 ];
-
-/// Board bring-up that every example needs. Call it first thing in `main`.
-///
-/// The KL82 watchdog is enabled out of reset and runs from the bus clock with
-/// a timeout of about half a second, so it has to be disabled (or serviced)
-/// early or the chip silently resets. The unlock sequence must complete within
-/// 20 bus cycles and the configuration write within 256 bus cycles after it.
-pub fn init() {
-    // Make sure the flash configuration field is never optimised away even
-    // when nothing else references this crate.
-    core::hint::black_box(&FLASH_CONFIG);
-
-    cortex_m::interrupt::free(|_| {
-        WDOG.unlock().write(|w| w.set_wdogunlock(0xC520));
-        WDOG.unlock().write(|w| w.set_wdogunlock(0xD928));
-        WDOG.stctrlh().modify(|w| w.set_wdogen(false));
-    });
-}
 
 /// Terminates the `probe-rs run` session with a success exit code.
 ///
