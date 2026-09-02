@@ -80,6 +80,20 @@ PTC11, nothing attached) gets its address NACK through the mux and LPUART2
 loops 64 bytes back at 9600 baud, each under a deadline so a lost interrupt
 fails instead of hanging.
 
+## Power modes
+
+`Config::clocks.run_mode` and `ClockConfig::vlpr()` select VLPR (4 MHz fast
+IRC, 1 MHz flash, LPUART moves to the 4 MHz IRC because the 48 MHz one is
+off). `Config::power.sleep_mode` picks what the executor's idle enters: WAIT,
+partial stop 1 or 2, STOP or VLPS; the TPM tick keeps running in all of them.
+`power::stop` enters LLS3 or a VLLS mode with LLWU pin and LPTMR timeout wake
+sources; VLLS exits through a reset, see `power::woke_from_vlls` and
+`power::release_io_after_vlls`. `low_power` runs through VLPR plus VLPS idle,
+LLS3 and VLLS3 with SW3 (PTD0) and a 5 s timeout as wake sources.
+
+The debugger loses the core while it sleeps in VLPS, LLS or VLLS, so RTT
+output pauses; the LED still shows progress. **Not yet verified on hardware.**
+
 ## Chip quirks handled here
 
 - **Flash configuration field at 0x400..0x40F.** `memory.x` places the
