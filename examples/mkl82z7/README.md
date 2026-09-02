@@ -95,13 +95,17 @@ fails instead of hanging.
   cortex-m-rt's `__pre_init` hook, before RAM initialisation. probe-rs exposes
   this; J-Link hides it because it disables the watchdog itself after reset.
 - **RAM starts at 0x1FFFA000.** SRAM_L and SRAM_U are contiguous 96 KiB.
-- **Recovering a reset-looping chip.** probe-rs has no Kinetis MDM-AP debug
-  sequence, so while the chip keeps resetting (for example firmware that forgot
-  the watchdog) the AHB-AP answers FAULT and probe-rs cannot connect. J-Link can:
+- **Recovering a reset-looping or secured chip.** While the chip keeps
+  resetting (for example firmware that forgot the watchdog, or a loop of
+  software resets) the AHB-AP answers FAULT and a plain `cargo run` cannot
+  connect. probe-rs's KL82 sequence handles this through the MDM-AP, which
+  stays reachable: `probe-rs erase` holds the system in reset and mass erases
+  the flash (this also unlocks a secured part), and the next flash clears the
+  ROM's sticky FORCEROM flag so the new firmware boots. No J-Link needed:
 
   ```sh
-  printf 'connect\nhalt\nloadfile target/thumbv6m-none-eabi/debug/hello 0x0\nr\ng\nexit\n' > /tmp/jl.txt
-  JLinkExe -device MKL82Z128xxx7 -if SWD -speed 4000 -autoconnect 1 -CommandFile /tmp/jl.txt
+  probe-rs erase --chip MKL82Z128VLK7 --protocol swd
+  cargo run --bin hello
   ```
 
 ## FRDM-KL82Z board
