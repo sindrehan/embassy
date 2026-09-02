@@ -34,15 +34,23 @@ J1 pin 14) instead; the example says which two lines to change.
 
 `lpuart_loopback` needs no wiring: it puts LPUART0 in internal loopback and
 checks 64 bytes through the async API at 115200 and the blocking API at 9600,
-then exits. LPUART2 has no NVIC vector of its own (it sits behind INTMUX0), so
-it is blocking only.
+then exits. LPUART2 has no NVIC vector of its own; it reaches the core through
+INTMUX0 channel 0, so its handler binds to `INTMUX0_0` (see `intmux`). It also
+has only a 1-byte receive buffer, so without DMA keep it to modest baud rates.
 
 ## I2C
 
 `i2c_accel` reads the on-board FXOS8700CQ accelerometer over I2C0 (PTD2 SCL,
 PTD3 SDA, address 0x1C): WHO_AM_I through the blocking and the async API, a
-deliberate NACK from an empty address, then a few acceleration samples. I2C1
-is blocking only for the same INTMUX reason as LPUART2.
+deliberate NACK from an empty address, then a few acceleration samples.
+
+## INTMUX0
+
+`intmux` shows the peripherals without an NVIC line of their own: I2C1 and
+LPUART2 both bind to `INTMUX0_0` on one `bind_interrupts!` line. I2C1 (PTC10,
+PTC11, nothing attached) gets its address NACK through the mux and LPUART2
+loops 64 bytes back at 9600 baud, each under a deadline so a lost interrupt
+fails instead of hanging.
 
 ## Chip quirks handled here
 
