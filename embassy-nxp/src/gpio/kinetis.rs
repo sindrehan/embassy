@@ -1,12 +1,26 @@
 #![macro_use]
 
+use core::future::Future;
+use core::task::{Context, Poll};
+
+use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_hal_internal::{PeripheralType, impl_peripheral};
+use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::Peri;
 use crate::pac::common::{RW, Reg};
-use crate::pac::port::vals::Mux;
-use crate::pac::{GPIOA, GPIOB, GPIOC, GPIOD, GPIOE, PORTA, PORTB, PORTC, PORTD, PORTE, gpio, port};
+#[cfg(feature = "rt")]
+use crate::pac::interrupt;
+use crate::pac::port::vals::{Irqc, Mux};
+use crate::pac::{GPIOA, GPIOB, GPIOC, GPIOD, GPIOE, Interrupt, PORTA, PORTB, PORTC, PORTD, PORTE, gpio, port};
 use crate::peripherals;
+
+const PORT_COUNT: usize = 5;
+const PINS_PER_PORT: usize = 32;
+
+/// One waker per pin, indexed by port then pin number.
+static WAKERS: [[AtomicWaker; PINS_PER_PORT]; PORT_COUNT] =
+    [const { [const { AtomicWaker::new() }; PINS_PER_PORT] }; PORT_COUNT];
 
 pub(crate) fn init() {
     // The pin control registers (PORTx_PCRn) bus-fault until the port clock is gated on.
@@ -15,11 +29,69 @@ pub(crate) fn init() {
     crate::clocks::enable::<peripherals::PORTC>();
     crate::clocks::enable::<peripherals::PORTD>();
     crate::clocks::enable::<peripherals::PORTE>();
+
+    // One NVIC line per port carries every pin interrupt; the HAL owns them.
+    unsafe {
+        Interrupt::PORTA.enable();
+        Interrupt::PORTB.enable();
+        Interrupt::PORTC.enable();
+        Interrupt::PORTD.enable();
+        Interrupt::PORTE.enable();
+    }
     info!("GPIO initialized");
+}
+
+/// Port interrupt: for every pin with its flag set, switch the pin's interrupt off (a level
+/// condition would otherwise fire again immediately), clear the flag and wake the waiter, which
+/// recognises completion by the interrupt being off.
+#[cfg(feature = "rt")]
+fn on_port_interrupt(bank: Bank) {
+    let port = bank.port();
+    let flags = port.isfr().read().0;
+    for pin in 0..PINS_PER_PORT {
+        if flags & (1 << pin) != 0 {
+            port.pcr(pin).modify(|w| {
+                w.set_irqc(Irqc::_0000);
+                w.set_isf(true);
+            });
+            WAKERS[bank as usize][pin].wake();
+        }
+    }
+}
+
+#[cfg(feature = "rt")]
+#[interrupt]
+fn PORTA() {
+    on_port_interrupt(Bank::GpioA);
+}
+
+#[cfg(feature = "rt")]
+#[interrupt]
+fn PORTB() {
+    on_port_interrupt(Bank::GpioB);
+}
+
+#[cfg(feature = "rt")]
+#[interrupt]
+fn PORTC() {
+    on_port_interrupt(Bank::GpioC);
+}
+
+#[cfg(feature = "rt")]
+#[interrupt]
+fn PORTD() {
+    on_port_interrupt(Bank::GpioD);
+}
+
+#[cfg(feature = "rt")]
+#[interrupt]
+fn PORTE() {
+    on_port_interrupt(Bank::GpioE);
 }
 
 /// The GPIO pin level.
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Level {
     /// Logical low. Corresponds to 0V.
     Low,
@@ -29,6 +101,7 @@ pub enum Level {
 
 /// Pull setting for a GPIO input.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Pull {
     /// No pull.
     None,
@@ -41,12 +114,13 @@ pub enum Pull {
 /// A GPIO port. Each Kinetis port pairs a `PORTx` pin control block (mux, pull, interrupts) with
 /// a `GPIOx` data block (direction, input, output).
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Bank {
-    GpioA,
-    GpioB,
-    GpioC,
-    GpioD,
-    GpioE,
+    GpioA = 0,
+    GpioB = 1,
+    GpioC = 2,
+    GpioD = 3,
+    GpioE = 4,
 }
 
 impl Bank {
@@ -111,6 +185,16 @@ impl<'d> Output<'d> {
     pub fn level(&self) -> Level {
         self.pin.level()
     }
+
+    /// Whether the output is driven high.
+    pub fn is_set_high(&self) -> bool {
+        self.pin.is_set_high()
+    }
+
+    /// Whether the output is driven low.
+    pub fn is_set_low(&self) -> bool {
+        !self.is_set_high()
+    }
 }
 
 /// GPIO input driver. Internally, this is a specialized [Flex] pin.
@@ -138,6 +222,41 @@ impl<'d> Input<'d> {
     /// Get the current input level of the pin.
     pub fn read(&self) -> Level {
         self.pin.level()
+    }
+
+    /// Whether the input is high.
+    pub fn is_high(&self) -> bool {
+        self.read() == Level::High
+    }
+
+    /// Whether the input is low.
+    pub fn is_low(&self) -> bool {
+        self.read() == Level::Low
+    }
+
+    /// Wait until the pin is high. Returns immediately if it already is.
+    pub async fn wait_for_high(&mut self) {
+        self.pin.wait_for_high().await
+    }
+
+    /// Wait until the pin is low. Returns immediately if it already is.
+    pub async fn wait_for_low(&mut self) {
+        self.pin.wait_for_low().await
+    }
+
+    /// Wait for a low to high transition.
+    pub async fn wait_for_rising_edge(&mut self) {
+        self.pin.wait_for_rising_edge().await
+    }
+
+    /// Wait for a high to low transition.
+    pub async fn wait_for_falling_edge(&mut self) {
+        self.pin.wait_for_falling_edge().await
+    }
+
+    /// Wait for a transition in either direction.
+    pub async fn wait_for_any_edge(&mut self) {
+        self.pin.wait_for_any_edge().await
     }
 }
 
@@ -212,6 +331,249 @@ impl<'d> Flex<'d> {
         } else {
             Level::Low
         }
+    }
+
+    /// Whether the pin is high.
+    pub fn is_high(&self) -> bool {
+        self.level() == Level::High
+    }
+
+    /// Whether the pin is low.
+    pub fn is_low(&self) -> bool {
+        self.level() == Level::Low
+    }
+
+    /// Whether the output register drives the pin high (regardless of direction).
+    pub fn is_set_high(&self) -> bool {
+        self.gpio().pdor().read().pdo(self.pin.pin_number() as usize)
+    }
+
+    pub fn set_high(&mut self) {
+        self.gpio().psor().write(|w| w.set_ptso(self.pin.pin_number() as usize, true));
+    }
+
+    pub fn set_low(&mut self) {
+        self.gpio().pcor().write(|w| w.set_ptco(self.pin.pin_number() as usize, true));
+    }
+
+    pub fn toggle(&mut self) {
+        self.gpio().ptor().write(|w| w.set_ptto(self.pin.pin_number() as usize, true));
+    }
+
+    /// Wait until the pin is high. Returns immediately if it already is.
+    pub async fn wait_for_high(&mut self) {
+        if self.is_high() {
+            return;
+        }
+        InputFuture::new(self, Irqc::_1100).await
+    }
+
+    /// Wait until the pin is low. Returns immediately if it already is.
+    pub async fn wait_for_low(&mut self) {
+        if self.is_low() {
+            return;
+        }
+        InputFuture::new(self, Irqc::_1000).await
+    }
+
+    /// Wait for a low to high transition.
+    pub async fn wait_for_rising_edge(&mut self) {
+        InputFuture::new(self, Irqc::_1001).await
+    }
+
+    /// Wait for a high to low transition.
+    pub async fn wait_for_falling_edge(&mut self) {
+        InputFuture::new(self, Irqc::_1010).await
+    }
+
+    /// Wait for a transition in either direction.
+    pub async fn wait_for_any_edge(&mut self) {
+        InputFuture::new(self, Irqc::_1011).await
+    }
+}
+
+/// Completes when the pin interrupt configured with `irqc` has fired. The port handler switches
+/// the pin's interrupt off when it fires, which is what the future looks for.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+struct InputFuture<'a> {
+    bank: Bank,
+    pin: u8,
+    _lifetime: core::marker::PhantomData<&'a mut ()>,
+}
+
+impl<'a> InputFuture<'a> {
+    fn new(flex: &'a mut Flex<'_>, irqc: Irqc) -> Self {
+        let bank = flex.pin_bank();
+        let pin = flex.pin_number();
+        // Clear a stale flag and arm. Level modes raise the interrupt at once if the condition
+        // already holds, so no event between the caller's check and this point is lost.
+        critical_section::with(|_| {
+            bank.port().pcr(pin as usize).modify(|w| {
+                w.set_isf(true);
+                w.set_irqc(irqc);
+            });
+        });
+        Self {
+            bank,
+            pin,
+            _lifetime: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a> Future for InputFuture<'a> {
+    type Output = ();
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        WAKERS[self.bank as usize][self.pin as usize].register(cx.waker());
+        if self.bank.port().pcr(self.pin as usize).read().irqc() == Irqc::_0000 {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl<'a> Drop for InputFuture<'a> {
+    fn drop(&mut self) {
+        critical_section::with(|_| {
+            self.bank.port().pcr(self.pin as usize).modify(|w| {
+                w.set_irqc(Irqc::_0000);
+                w.set_isf(true);
+            });
+        });
+    }
+}
+
+// embedded-hal digital traits.
+
+impl<'d> embedded_hal_1::digital::ErrorType for Input<'d> {
+    type Error = core::convert::Infallible;
+}
+
+impl<'d> embedded_hal_1::digital::InputPin for Input<'d> {
+    fn is_high(&mut self) -> Result<bool, Self::Error> {
+        Ok(Input::is_high(self))
+    }
+
+    fn is_low(&mut self) -> Result<bool, Self::Error> {
+        Ok(Input::is_low(self))
+    }
+}
+
+impl<'d> embedded_hal_async::digital::Wait for Input<'d> {
+    async fn wait_for_high(&mut self) -> Result<(), Self::Error> {
+        Input::wait_for_high(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_low(&mut self) -> Result<(), Self::Error> {
+        Input::wait_for_low(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_rising_edge(&mut self) -> Result<(), Self::Error> {
+        Input::wait_for_rising_edge(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_falling_edge(&mut self) -> Result<(), Self::Error> {
+        Input::wait_for_falling_edge(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_any_edge(&mut self) -> Result<(), Self::Error> {
+        Input::wait_for_any_edge(self).await;
+        Ok(())
+    }
+}
+
+impl<'d> embedded_hal_1::digital::ErrorType for Output<'d> {
+    type Error = core::convert::Infallible;
+}
+
+impl<'d> embedded_hal_1::digital::OutputPin for Output<'d> {
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        Output::set_high(self);
+        Ok(())
+    }
+
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        Output::set_low(self);
+        Ok(())
+    }
+}
+
+impl<'d> embedded_hal_1::digital::StatefulOutputPin for Output<'d> {
+    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
+        Ok(Output::is_set_high(self))
+    }
+
+    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
+        Ok(Output::is_set_low(self))
+    }
+}
+
+impl<'d> embedded_hal_1::digital::ErrorType for Flex<'d> {
+    type Error = core::convert::Infallible;
+}
+
+impl<'d> embedded_hal_1::digital::InputPin for Flex<'d> {
+    fn is_high(&mut self) -> Result<bool, Self::Error> {
+        Ok(Flex::is_high(self))
+    }
+
+    fn is_low(&mut self) -> Result<bool, Self::Error> {
+        Ok(Flex::is_low(self))
+    }
+}
+
+impl<'d> embedded_hal_1::digital::OutputPin for Flex<'d> {
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        Flex::set_high(self);
+        Ok(())
+    }
+
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        Flex::set_low(self);
+        Ok(())
+    }
+}
+
+impl<'d> embedded_hal_1::digital::StatefulOutputPin for Flex<'d> {
+    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
+        Ok(Flex::is_set_high(self))
+    }
+
+    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
+        Ok(!Flex::is_set_high(self))
+    }
+}
+
+impl<'d> embedded_hal_async::digital::Wait for Flex<'d> {
+    async fn wait_for_high(&mut self) -> Result<(), Self::Error> {
+        Flex::wait_for_high(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_low(&mut self) -> Result<(), Self::Error> {
+        Flex::wait_for_low(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_rising_edge(&mut self) -> Result<(), Self::Error> {
+        Flex::wait_for_rising_edge(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_falling_edge(&mut self) -> Result<(), Self::Error> {
+        Flex::wait_for_falling_edge(self).await;
+        Ok(())
+    }
+
+    async fn wait_for_any_edge(&mut self) -> Result<(), Self::Error> {
+        Flex::wait_for_any_edge(self).await;
+        Ok(())
     }
 }
 
