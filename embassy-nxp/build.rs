@@ -523,6 +523,10 @@ const INTMUX_SOURCES: &[(&str, u8)] = &[
     ("CMP0", 16),
 ];
 
+/// DSPI FIFO depths (MKL82Z7 SDK `FSL_FEATURE_DSPI_FIFO_SIZEn`).
+#[cfg(feature = "_kinetis")]
+const DSPI_FIFO_DEPTH: &[(&str, u8)] = &[("SPI0", 4), ("SPI1", 1)];
+
 /// The tokens for a driver's `impl_*_interrupt!` invocation: the peripheral's own NVIC line, or
 /// the INTMUX channel line plus the source number, or nothing.
 #[cfg(feature = "_kinetis")]
@@ -560,6 +564,45 @@ fn impl_lpuart(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
         let r#macro = match signal.name {
             "TX" => format_ident!("impl_lpuart_tx_pin"),
             "RX" => format_ident!("impl_lpuart_rx_pin"),
+            _ => continue,
+        };
+
+        for pin in signal.pins {
+            let alt = Literal::u8_unsuffixed(pin.alt);
+            let pin = format_ident!("{}", pin.pin);
+            impls.push(quote! {
+                #r#macro!(#pin, #instance, #alt);
+            });
+        }
+    }
+}
+
+/// Kinetis DSPI: instance with FIFO depth, interrupt (own NVIC line or INTMUX channel), pins.
+#[cfg(feature = "_kinetis")]
+fn impl_dspi(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+    let depth = DSPI_FIFO_DEPTH
+        .iter()
+        .find(|(name, _)| *name == peripheral.name)
+        .map(|(_, depth)| *depth)
+        .unwrap_or(1);
+    let depth = Literal::u8_unsuffixed(depth);
+
+    impls.push(quote! {
+        impl_spi_instance!(#instance, #depth);
+    });
+
+    if let Some(args) = interrupt_args(peripheral) {
+        impls.push(quote! {
+            impl_spi_interrupt!(#args);
+        });
+    }
+
+    for signal in peripheral.signals {
+        let r#macro = match signal.name {
+            "SCK" => format_ident!("impl_spi_sck_pin"),
+            "SOUT" => format_ident!("impl_spi_mosi_pin"),
+            "SIN" => format_ident!("impl_spi_miso_pin"),
             _ => continue,
         };
 
@@ -625,6 +668,10 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
 
             if peripheral.name.starts_with("I2C") {
                 impl_i2c(&mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("SPI") {
+                impl_dspi(&mut impls, peripheral);
             }
         }
 

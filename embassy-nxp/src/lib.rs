@@ -23,7 +23,7 @@ pub mod pint;
 pub mod pwm;
 #[cfg(lpc55)]
 pub mod sct;
-#[cfg(lpc55)]
+#[cfg(any(lpc55, kinetis))]
 pub mod spi;
 #[cfg(lpc55)]
 pub mod usart;
