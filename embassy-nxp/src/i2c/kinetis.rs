@@ -4,8 +4,11 @@
 //! state machine that waits for the per-byte `IICIF` flag: the async driver sleeps on the
 //! interrupt, the blocking one busy-polls the same future with [`embassy_futures::block_on`].
 //!
-//! I2C1 reaches the NVIC through [INTMUX0](crate::intmux), so its handler is bound to
-//! `INTMUX0_0`. There are no timeouts: a slave holding the bus stalls the transfer.
+//! With a DMA channel ([`I2c::new_with_dma`]) the bulk of each read or write run moves by DMA
+//! while the address, the first written byte and the last two read bytes, which steer ACK and
+//! STOP, stay with the state machine. I2C1 reaches the NVIC through [INTMUX0](crate::intmux),
+//! so its handler is bound to `INTMUX0_0`. There are no timeouts: a slave holding the bus
+//! stalls the transfer.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -15,6 +18,8 @@ use core::task::Poll;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal_1::i2c::Operation;
+
+use crate::dma::{AnyChannel, Channel};
 
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::common::{RW, Reg};
@@ -47,6 +52,8 @@ pub enum Error {
     DataNack,
     /// A read of zero bytes was requested, which the hardware cannot do.
     InvalidReadBufferLength,
+    /// The DMA controller reported an error moving the data.
+    Dma,
 }
 
 impl embedded_hal_1::i2c::Error for Error {
@@ -58,6 +65,7 @@ impl embedded_hal_1::i2c::Error for Error {
             Error::AddressNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address),
             Error::DataNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
             Error::InvalidReadBufferLength => ErrorKind::Other,
+            Error::Dma => ErrorKind::Other,
         }
     }
 }
@@ -113,6 +121,7 @@ pub struct I2c<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
     is_async: bool,
+    dma: Option<(Peri<'d, AnyChannel>, u8)>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -179,6 +188,7 @@ impl<'d> I2c<'d, Blocking> {
             info: T::info(),
             state: T::state(),
             is_async: false,
+            dma: None,
             _phantom: PhantomData,
         }
     }
@@ -203,8 +213,23 @@ impl<'d> I2c<'d, Async> {
             info: T::info(),
             state: T::state(),
             is_async: true,
+            dma: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Create an async I2C master that moves the bulk of each transfer with a DMA channel.
+    pub fn new_with_dma<T: InterruptInstance>(
+        _peri: Peri<'d, T>,
+        scl: Peri<'d, impl SclPin<T>>,
+        sda: Peri<'d, impl SdaPin<T>>,
+        _irq: impl Binding<T::Interrupt, InterruptHandler<T>>,
+        dma: Peri<'d, impl Channel>,
+        config: Config,
+    ) -> Self {
+        let mut i2c = Self::new(_peri, scl, sda, _irq, config);
+        i2c.dma = Some((dma.into(), T::DMA_REQUEST));
+        i2c
     }
 
     /// Read into `buffer` from the device at `address`.
@@ -272,10 +297,34 @@ impl<'d, M: Mode> I2c<'d, M> {
         .await
     }
 
+    /// After a DMA run: the byte that the DMA's last register access started is in flight or
+    /// done, and IICIF may be stale from the DMA'd bytes. Return the status once it has finished.
+    async fn wait_after_dma(&mut self) -> S {
+        let regs = self.info.regs;
+        let s = regs.s().read();
+        if s.tcf() {
+            return s;
+        }
+        regs.s().write_value(S(0).with_iicif());
+        let s = regs.s().read();
+        if s.tcf() {
+            return s;
+        }
+        self.wait_iicif().await
+    }
+
     /// Wait for the byte in flight, clear the flag and report arbitration loss or a NACK.
     async fn finish_byte(&mut self, nack: Error) -> Result<(), Error> {
+        self.finish_byte_with(false, nack).await
+    }
+
+    async fn finish_byte_with(&mut self, after_dma: bool, nack: Error) -> Result<(), Error> {
         let regs = self.info.regs;
-        let s = self.wait_iicif().await;
+        let s = if after_dma {
+            self.wait_after_dma().await
+        } else {
+            self.wait_iicif().await
+        };
         regs.s().write_value(S(0).with_iicif());
         if s.arbl() {
             regs.s().write_value(S(0).with_arbl());
@@ -347,9 +396,27 @@ impl<'d, M: Mode> I2c<'d, M> {
                     regs.c1().modify(|w| w.set_tx(true));
                     // Consecutive writes are one stream of bytes.
                     while let Some(Operation::Write(bytes)) = operations.get(index) {
-                        for &byte in *bytes {
-                            regs.d().write(|w| w.set_data(byte));
-                            self.finish_byte(Error::DataNack).await?;
+                        if bytes.len() >= 2 && self.dma.is_some() {
+                            // First byte by hand with DMAEN set; each completion then requests
+                            // the next byte from the DMA until the slice is done.
+                            let (channel, request) = self.dma.as_mut().unwrap();
+                            regs.c1().modify(|w| w.set_dmaen(true));
+                            regs.d().write(|w| w.set_data(bytes[0]));
+                            let transfer = unsafe {
+                                crate::dma::write(channel.reborrow(), *request, &bytes[1..], regs.d().as_ptr() as *mut u8)
+                            };
+                            let result = transfer.await;
+                            regs.c1().modify(|w| w.set_dmaen(false));
+                            if result.is_err() {
+                                self.stop().await;
+                                return Err(Error::Dma);
+                            }
+                            self.finish_byte_with(true, Error::DataNack).await?;
+                        } else {
+                            for &byte in *bytes {
+                                regs.d().write(|w| w.set_data(byte));
+                                self.finish_byte(Error::DataNack).await?;
+                            }
                         }
                         index += 1;
                     }
@@ -386,10 +453,37 @@ impl<'d, M: Mode> I2c<'d, M> {
                     });
                     let _ = regs.d().read();
 
+                    // A single read of three or more bytes moves all but the last two by DMA;
+                    // those two set the NACK and the STOP.
+                    let mut after_dma = false;
+                    let mut skip = 0;
+                    if run_end == index + 1 && remaining >= 3 && self.dma.is_some() {
+                        let Operation::Read(buffer) = &mut operations[index] else { unreachable!() };
+                        let (channel, request) = self.dma.as_mut().unwrap();
+                        let count = remaining - 2;
+                        regs.c1().modify(|w| w.set_dmaen(true));
+                        let transfer = unsafe {
+                            crate::dma::read(channel.reborrow(), *request, regs.d().as_ptr() as *const u8, &mut buffer[..count])
+                        };
+                        let result = transfer.await;
+                        regs.c1().modify(|w| w.set_dmaen(false));
+                        if result.is_err() {
+                            self.stop().await;
+                            return Err(Error::Dma);
+                        }
+                        skip = count;
+                        remaining -= count;
+                        after_dma = true;
+                    }
+
                     for op in &mut operations[index..run_end] {
                         let Operation::Read(buffer) = op else { unreachable!() };
-                        for slot in buffer.iter_mut() {
-                            let s = self.wait_iicif().await;
+                        for slot in buffer.iter_mut().skip(skip) {
+                            let s = if core::mem::take(&mut after_dma) {
+                                self.wait_after_dma().await
+                            } else {
+                                self.wait_iicif().await
+                            };
                             regs.s().write_value(S(0).with_iicif());
                             if s.arbl() {
                                 regs.s().write_value(S(0).with_arbl());
@@ -410,6 +504,7 @@ impl<'d, M: Mode> I2c<'d, M> {
                             *slot = regs.d().read().data();
                             remaining -= 1;
                         }
+                        skip = 0;
                     }
                     index = run_end;
                 }
@@ -478,6 +573,8 @@ impl SWith for S {
 }
 
 pub(crate) trait SealedInstance {
+    /// DMAMUX request source (shared by both directions).
+    const DMA_REQUEST: u8;
     fn info() -> &'static Info;
     fn state() -> &'static State;
     fn enable_clock();
@@ -497,8 +594,10 @@ pub trait InterruptInstance: Instance {
 }
 
 macro_rules! impl_i2c_instance {
-    ($inst:ident) => {
+    ($inst:ident, $request:expr) => {
         impl crate::i2c::SealedInstance for crate::peripherals::$inst {
+            const DMA_REQUEST: u8 = $request;
+
             fn info() -> &'static crate::i2c::Info {
                 static INFO: crate::i2c::Info = crate::i2c::Info {
                     regs: crate::pac::$inst,

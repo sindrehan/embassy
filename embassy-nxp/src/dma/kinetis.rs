@@ -136,6 +136,29 @@ pub unsafe fn write<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from:
     transfer_inner(ch, request, from as *const W as u32, to as u32, from.len(), W::SIZE, true, false)
 }
 
+/// Peripheral to nowhere: `count` words from the register at `from`, discarded. Useful to drain
+/// a receive register while only transmitting.
+///
+/// # Safety
+///
+/// `from` must be a peripheral data register set up to raise the request.
+pub unsafe fn read_discard<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: *const W, count: usize) -> Transfer<'a, C> {
+    transfer_inner(ch, request, from as u32, &raw const SINK as u32, count, W::SIZE, false, false)
+}
+
+/// One fixed word to a peripheral, `count` times. Useful to clock a receive-only transfer.
+///
+/// # Safety
+///
+/// `to` must be a peripheral data register set up to raise the request; `from` must stay valid
+/// and unchanged for the whole transfer.
+pub unsafe fn write_repeated<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: *const W, to: *mut W, count: usize) -> Transfer<'a, C> {
+    transfer_inner(ch, request, from as u32, to as u32, count, W::SIZE, false, false)
+}
+
+/// Destination of [`read_discard`]. Written by DMA only, never read.
+static mut SINK: u32 = 0;
+
 #[allow(clippy::too_many_arguments)]
 fn transfer_inner<'a, C: Channel>(
     ch: Peri<'a, C>,

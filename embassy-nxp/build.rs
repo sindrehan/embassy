@@ -596,9 +596,19 @@ fn impl_dspi(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
         .map(|(_, depth)| *depth)
         .unwrap_or(1);
     let depth = Literal::u8_unsuffixed(depth);
+    let request = |suffix: &str| {
+        let name = format!("{}{}", peripheral.name, suffix);
+        let dma = peripheral
+            .dma_muxing
+            .iter()
+            .find(|d| d.signal == name)
+            .unwrap_or_else(|| panic!("{} has no DMA request", name));
+        Literal::u8_unsuffixed(dma.request)
+    };
+    let (rx_request, tx_request) = (request("Rx"), request("Tx"));
 
     impls.push(quote! {
-        impl_spi_instance!(#instance, #depth);
+        impl_spi_instance!(#instance, #depth, #rx_request, #tx_request);
     });
 
     if let Some(args) = interrupt_args(peripheral) {
@@ -629,9 +639,15 @@ fn impl_dspi(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
 #[cfg(feature = "_kinetis")]
 fn impl_i2c(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     let instance = Ident::new(peripheral.name, Span::call_site());
+    let request = peripheral
+        .dma_muxing
+        .iter()
+        .find(|d| d.signal == peripheral.name)
+        .unwrap_or_else(|| panic!("{} has no DMA request", peripheral.name));
+    let request = Literal::u8_unsuffixed(request.request);
 
     impls.push(quote! {
-        impl_i2c_instance!(#instance);
+        impl_i2c_instance!(#instance, #request);
     });
 
     if let Some(args) = interrupt_args(peripheral) {

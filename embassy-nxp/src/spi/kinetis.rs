@@ -4,8 +4,9 @@
 //! module; use a GPIO, for example through `embassy_embedded_hal`'s `SpiDevice`. SPI0 has a
 //! 4-entry FIFO, SPI1 a single entry. The blocking and async APIs share one transfer routine:
 //! the async driver sleeps on the "receive FIFO not empty" interrupt, the blocking driver
-//! busy-polls the same future with [`embassy_futures::block_on`]. SPI1 reaches the NVIC through
-//! [INTMUX0](crate::intmux), so its handler is bound to `INTMUX0_0`.
+//! busy-polls the same future with [`embassy_futures::block_on`]. With two DMA channels
+//! ([`Spi::new_with_dma`]) the FIFOs are fed and drained by DMA instead. SPI1 reaches the NVIC
+//! through [INTMUX0](crate::intmux), so its handler is bound to `INTMUX0_0`.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -15,6 +16,8 @@ use core::task::Poll;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 pub use embedded_hal_1::spi::{Phase, Polarity};
+
+use crate::dma::{AnyChannel, Channel};
 
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::common::{RW, Reg};
@@ -42,12 +45,15 @@ const SCALERS: [u32; 16] = [
 pub enum Error {
     /// The receive FIFO overflowed.
     Overrun,
+    /// The DMA controller reported an error moving the data.
+    Dma,
 }
 
 impl embedded_hal_1::spi::Error for Error {
     fn kind(&self) -> embedded_hal_1::spi::ErrorKind {
         match self {
             Error::Overrun => embedded_hal_1::spi::ErrorKind::Overrun,
+            Error::Dma => embedded_hal_1::spi::ErrorKind::Other,
         }
     }
 }
@@ -114,7 +120,15 @@ pub struct Spi<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
     is_async: bool,
+    dma: Option<Dma<'d>>,
     _phantom: PhantomData<(&'d (), M)>,
+}
+
+struct Dma<'d> {
+    tx: Peri<'d, AnyChannel>,
+    tx_request: u8,
+    rx: Peri<'d, AnyChannel>,
+    rx_request: u8,
 }
 
 /// `DBR`, `PBR`, `BR` for the highest SCK rate not above `frequency`, like the SDK.
@@ -257,6 +271,33 @@ impl<'d> Spi<'d, Async> {
         Self::new_inner::<T>(true)
     }
 
+    /// Create an async full-duplex master whose FIFOs are fed and drained by DMA. No interrupt
+    /// binding is needed: completion comes from the DMA controller.
+    pub fn new_with_dma<T: Instance>(
+        _peri: Peri<'d, T>,
+        sck: Peri<'d, impl SckPin<T>>,
+        mosi: Peri<'d, impl MosiPin<T>>,
+        miso: Peri<'d, impl MisoPin<T>>,
+        tx_dma: Peri<'d, impl Channel>,
+        rx_dma: Peri<'d, impl Channel>,
+        config: Config,
+    ) -> Self {
+        init::<T>(
+            (sck.pcr(), sck.alt()),
+            Some((mosi.pcr(), mosi.alt())),
+            Some((miso.pcr(), miso.alt())),
+            &config,
+        );
+        let mut spi = Self::new_inner::<T>(true);
+        spi.dma = Some(Dma {
+            tx: tx_dma.into(),
+            tx_request: T::TX_DMA_REQUEST,
+            rx: rx_dma.into(),
+            rx_request: T::RX_DMA_REQUEST,
+        });
+        spi
+    }
+
     /// Clock `write` out and `read` in at the same time. The longer slice sets the length; the
     /// shorter one is padded with 0xFF on the way out or dropped on the way in.
     pub async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error> {
@@ -285,6 +326,7 @@ impl<'d, M: Mode> Spi<'d, M> {
             info: T::info(),
             state: T::state(),
             is_async,
+            dma: None,
             _phantom: PhantomData,
         }
     }
@@ -344,6 +386,56 @@ impl<'d, M: Mode> Spi<'d, M> {
         self.transfer_inner(read, write).await
     }
 
+    /// Full-duplex transfer with the DMA channels: one channel feeds PUSHR's data byte on every
+    /// TFFF request, the other drains POPR on every RFDF request. Slices shorter than `len` are
+    /// padded with 0xFF from a fixed source or drained into a sink.
+    async fn transfer_dma(&mut self, read: &mut [u8], write: &[u8], len: usize) -> Result<(), Error> {
+        let regs = self.info.regs;
+        let dma = self.dma.as_mut().unwrap();
+
+        // The command half of PUSHR (PCS, CTAS, CONT: all zero) persists across byte writes to
+        // its data half, which is what the DMA does.
+        unsafe { (regs.pushr().as_ptr() as *mut u16).add(1).write_volatile(0) };
+        let pushr = regs.pushr().as_ptr() as *mut u8;
+        let popr = regs.popr().as_ptr() as *const u8;
+        static DUMMY_BYTE: u8 = DUMMY;
+
+        let rx = unsafe {
+            if read.len() == len {
+                crate::dma::read(dma.rx.reborrow(), dma.rx_request, popr, read)
+            } else {
+                assert!(read.is_empty(), "read slice must be empty or full length");
+                crate::dma::read_discard::<_, u8>(dma.rx.reborrow(), dma.rx_request, popr, len)
+            }
+        };
+        let tx = unsafe {
+            if write.len() == len {
+                crate::dma::write(dma.tx.reborrow(), dma.tx_request, write, pushr)
+            } else {
+                assert!(write.is_empty(), "write slice must be empty or full length");
+                crate::dma::write_repeated(dma.tx.reborrow(), dma.tx_request, &raw const DUMMY_BYTE, pushr, len)
+            }
+        };
+
+        regs.rser().write(|w| {
+            w.set_rfdf_re(true);
+            w.set_rfdf_dirs(true);
+            w.set_tfff_re(true);
+            w.set_tfff_dirs(true);
+        });
+        let (rx, tx) = embassy_futures::join::join(rx, tx).await;
+        regs.rser().write(|_| {});
+
+        if rx.is_err() || tx.is_err() {
+            return Err(Error::Dma);
+        }
+        if regs.sr().read().rfof() {
+            regs.sr().write_value(Sr(0).with_rfof());
+            return Err(Error::Overrun);
+        }
+        Ok(())
+    }
+
     async fn transfer_inner(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error> {
         let regs = self.info.regs;
         let depth = self.info.fifo_depth as usize;
@@ -357,6 +449,10 @@ impl<'d, M: Mode> Spi<'d, M> {
             w.set_clr_rxf(true);
         });
         regs.sr().write_value(Sr(SR_W1C));
+
+        if self.dma.is_some() {
+            return self.transfer_dma(read, write, len).await;
+        }
 
         let mut sent = 0;
         let mut received = 0;
@@ -487,6 +583,10 @@ impl<'d> embedded_hal_async::spi::SpiBus<u8> for Spi<'d, Async> {
 }
 
 pub(crate) trait SealedInstance {
+    /// DMAMUX request source for received frames.
+    const RX_DMA_REQUEST: u8;
+    /// DMAMUX request source for transmit frames.
+    const TX_DMA_REQUEST: u8;
     fn info() -> &'static Info;
     fn state() -> &'static State;
     fn enable_clock();
@@ -506,8 +606,11 @@ pub trait InterruptInstance: Instance {
 }
 
 macro_rules! impl_spi_instance {
-    ($inst:ident, $fifo_depth:expr) => {
+    ($inst:ident, $fifo_depth:expr, $rx_request:expr, $tx_request:expr) => {
         impl crate::spi::SealedInstance for crate::peripherals::$inst {
+            const RX_DMA_REQUEST: u8 = $rx_request;
+            const TX_DMA_REQUEST: u8 = $tx_request;
+
             fn info() -> &'static crate::spi::Info {
                 static INFO: crate::spi::Info = crate::spi::Info {
                     regs: crate::pac::$inst,
