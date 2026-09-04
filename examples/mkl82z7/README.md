@@ -13,6 +13,13 @@ can still be replaced.
 Async examples use the Kinetis executor so clock recovery completes before an
 interrupt handler runs after waking from VLPS.
 
+The examples use the 1 MHz TPM time driver by default. To use the 1 kHz LPTMR
+driver instead, disable the default feature and enable `time-driver-lptmr`:
+
+```sh
+cargo run --release --no-default-features --features time-driver-lptmr --bin lptmr_time
+```
+
 ## Board connections
 
 - The RGB LED is active low: red PTC1, green PTC2, blue PTC0.
@@ -52,9 +59,12 @@ the reset clock configuration.
 - `sleep_modes`: exercises the idle sleep modes in RUN and VLPR.
 - `vlps_pll`: runs at 72 MHz from the PLL, idles in VLPS, and verifies that
   each timer wake restores PEE before application code runs.
+- `lptmr_time`: checks short alarms and the 16-bit counter extension while the
+  executor idles in VLPS. Requires the `time-driver-lptmr` feature.
 - `low_power`: enters VLPS, LLS3, and VLLS3, waking from SW3 or an LPTMR
   timeout. VLLS wakeup resets the MCU, and the example reports the retained
-  wake source after restart.
+  wake source after restart. Requires the default `time-driver-tpm` feature
+  because the LPTMR time driver owns both LPTMR instances.
 
 The LPUART clock must remain active for asynchronous serial reception in STOP
 or VLPS. The supplied configurations use the fast internal reference clock
