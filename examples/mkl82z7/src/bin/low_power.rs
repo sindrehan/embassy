@@ -10,10 +10,10 @@
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
-use embassy_nxp::clocks::ClockConfig;
 use core::fmt::Write as _;
 
+use embassy_executor::Spawner;
+use embassy_nxp::clocks::ClockConfig;
 use embassy_nxp::gpio::{Input, Level, Output, Pull};
 use embassy_nxp::lpuart::{self, Lpuart};
 use embassy_nxp::power::{self, LeakageMode, SleepMode, Wake, WakeEdge};
@@ -39,9 +39,9 @@ async fn main(_spawner: Spawner) {
     let mut config = embassy_nxp::config::Config::default();
     config.clocks = ClockConfig::vlpr();
     config.power.sleep_mode = SleepMode::VeryLowPowerStop;
-    let p = embassy_nxp::init(config);
+    let mut p = embassy_nxp::init(config);
     // Read (and clear) the VLLS wake source before the pins are released.
-    let vlls_wake = power::vlls_wake_reason();
+    let vlls_wake = power::vlls_wake_reason(&mut p.LLWU, Some(&mut p.LPTMR0));
     let mut led = Output::new(p.PTC1, Level::High);
     let button = Input::new(p.PTD0, Pull::Up);
     let mut uart = Lpuart::new_blocking(p.LPUART0, p.PTB17, p.PTB16, lpuart::Config::default());
@@ -74,11 +74,19 @@ async fn main(_spawner: Spawner) {
         Timer::after_millis(250).await;
     }
     led.set_high();
-    log(&mut uart, format_args!("10 x 250 ms timer wakes from VLPS took {} ms", start.elapsed().as_millis()));
+    log(
+        &mut uart,
+        format_args!(
+            "10 x 250 ms timer wakes from VLPS took {} ms",
+            start.elapsed().as_millis()
+        ),
+    );
 
     defmt::info!("entering LLS3: press SW3 or wait 5 s");
     log(&mut uart, format_args!("entering LLS3: press SW3 or wait 5 s"));
     let reason = power::stop(
+        &mut p.LLWU,
+        Some(&mut p.LPTMR0),
         LeakageMode::LowLeakageStop,
         &[
             Wake::Pin(&button, WakeEdge::Falling),
@@ -93,9 +101,14 @@ async fn main(_spawner: Spawner) {
     }
 
     defmt::info!("entering VLLS3: press SW3 or wait 5 s, the wakeup is a reset");
-    log(&mut uart, format_args!("entering VLLS3: press SW3 or wait 5 s, the wakeup is a reset"));
+    log(
+        &mut uart,
+        format_args!("entering VLLS3: press SW3 or wait 5 s, the wakeup is a reset"),
+    );
     Timer::after(Duration::from_millis(50)).await;
     power::stop(
+        &mut p.LLWU,
+        Some(&mut p.LPTMR0),
         LeakageMode::Vlls3,
         &[
             Wake::Pin(&button, WakeEdge::Falling),

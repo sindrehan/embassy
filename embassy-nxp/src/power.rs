@@ -4,13 +4,12 @@
 //!
 //! - **Run modes.** RUN, HSRUN (entered by [`clocks`](crate::clocks) when the core clock needs it)
 //!   and VLPR, selected through [`ClockConfig::run_mode`](crate::clocks::ClockConfig) because VLPR
-//!   restricts the clocks: BLPI on the fast IRC, core and bus at most 4 MHz, flash at most 1 MHz.
+//!   restricts the clocks: BLPI on the fast IRC, 4 MHz core, and 800 kHz bus and flash clocks.
 //! - **Idle sleep.** [`Config::sleep_mode`] picks what the executor's idle `WFE` enters: WAIT,
 //!   a partial stop, STOP or VLPS. The time driver keeps ticking in all of them (its TPM clock,
 //!   the fast IRC, is kept running in stop), so `embassy-time` wakes the core as usual. Bus
-//!   peripherals only keep working while asleep in WAIT and partial stop 2; in STOP and VLPS
-//!   their clocks stop and, for example, incoming LPUART bytes are lost until the next wake.
-//!   The debug port does not answer in any stop mode, see [`Config::sleep_mode`].
+//!   peripherals only keep working while asleep in WAIT and partial stop 2. Peripherals with an
+//!   asynchronous clock, including LPUART and TPM, can remain active in STOP and VLPS.
 //! - **Low leakage.** [`stop`] enters LLS or VLLS with LLWU pin and LPTMR timeout wake sources.
 //!   `embassy-time` does not advance while in these modes. VLLS exits through a reset; see
 //!   [`vlls_wake_reason`] and [`release_io_after_vlls`].
@@ -19,7 +18,7 @@ use core::time::Duration;
 
 use embassy_hal_internal::interrupt::InterruptExt;
 
-use crate::clocks::{ClockConfig, McgMode, RunMode};
+use crate::clocks::{ClockConfig, McgMode, RUN_MAX_CORE_HZ, RunMode};
 
 impl ClockConfig {
     fn uses_pll(&self) -> bool {
@@ -31,7 +30,7 @@ use crate::pac::llwu::vals::Wupe;
 use crate::pac::lptmr::vals::Pcs;
 use crate::pac::smc::vals::{Llsm, Pstopo, Runm, Stopm};
 use crate::pac::{Interrupt, LLWU, LPTMR0, MCG, PMC, RCM, SMC};
-use crate::peripherals;
+use crate::{Peri, peripherals};
 
 /// What the core enters when the executor idles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -54,10 +53,7 @@ pub enum SleepMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
-    /// What the executor's idle enters. Note that the debug port does not answer while the core
-    /// is in any stop mode, so a probe-rs session polling RTT loses the target; develop with
-    /// [`SleepMode::Wait`] or without an attached session, and reflash with
-    /// `--connect-under-reset`.
+    /// What the executor's idle enters.
     pub sleep_mode: SleepMode,
 }
 
@@ -153,6 +149,10 @@ pub fn sleep_mode() -> SleepMode {
 
 fn apply_sleep_mode(mode: SleepMode, pll: bool) {
     let deep = mode != SleepMode::Wait;
+    assert!(
+        !deep || crate::clocks::clocks().core <= RUN_MAX_CORE_HZ,
+        "stop modes cannot be entered directly from HSRUN"
+    );
     if mode == SleepMode::VeryLowPowerStop {
         assert!(
             !pll,
@@ -201,8 +201,14 @@ fn llwu_input(bank: Bank, pin: u8) -> Option<u8> {
 /// after that reset [`woke_from_vlls`] is true and the pins stay frozen until
 /// [`release_io_after_vlls`]. Not available with a PLL clock configuration.
 ///
-/// The executor is not running while this blocks, and `embassy-time` does not advance.
-pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
+/// The executor is not running while this blocks, and `embassy-time` does not advance. The LLWU
+/// token is required for every call. Pass the LPTMR0 token when `wake` contains a timeout.
+pub fn stop(
+    _llwu: &mut Peri<'_, peripherals::LLWU>,
+    lptmr: Option<&mut Peri<'_, peripherals::LPTMR0>>,
+    mode: LeakageMode,
+    wake: &[Wake<'_>],
+) -> WakeReason {
     let sleep_before = (SMC.pmctrl().read().stopm(), SMC.stopctrl().read().pstopo());
     let (stopm, llsm) = match mode {
         LeakageMode::LowLeakageStop => (Stopm::_011, Llsm::_011),
@@ -216,8 +222,31 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
         "low leakage stop is not available with a PLL clock configuration"
     );
 
-    // Wake sources.
-    let mut timeout = false;
+    let timeout = wake.iter().any(|source| matches!(source, Wake::Timeout(_)));
+    assert!(
+        !timeout || lptmr.is_some(),
+        "an LPTMR0 token is required for timeout wakeup"
+    );
+
+    let pe_before = core::array::from_fn::<_, 8, _>(|i| LLWU.pe(i).read());
+    let me_before = LLWU.me().read();
+    let llwu_irq_before = (Interrupt::LLWU.is_enabled(), Interrupt::LLWU.is_pending());
+    let lptmr_irq_before = (Interrupt::LPTMR0.is_enabled(), Interrupt::LPTMR0.is_pending());
+
+    let lptmr_clock_before = timeout && crate::clocks::is_enabled::<peripherals::LPTMR0>();
+    if timeout {
+        crate::clocks::enable::<peripherals::LPTMR0>();
+    }
+    let lptmr_before = lptmr
+        .as_ref()
+        .filter(|_| timeout)
+        .map(|_| (LPTMR0.csr().read(), LPTMR0.psr().read(), LPTMR0.cmr().read()));
+
+    // Clear stale pin flags before arming any wake source.
+    for i in 0..4 {
+        LLWU.pf(i).write(|w| w.0 = 0xFF);
+    }
+
     for source in wake {
         match source {
             Wake::Pin(input, edge) => {
@@ -234,7 +263,6 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
             Wake::Timeout(duration) => {
                 assert!(mode != LeakageMode::Vlls0, "the LPTMR has no clock in VLLS0");
                 let ms = duration.as_millis().clamp(1, u16::MAX as u128) as u16;
-                crate::clocks::enable::<peripherals::LPTMR0>();
                 LPTMR0.csr().write(|_| {});
                 LPTMR0.psr().write(|w| {
                     // Clock 1 is the 1 kHz LPO; bypass the prescaler for 1 ms ticks.
@@ -242,18 +270,13 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
                     w.set_pbyp(true);
                 });
                 LPTMR0.cmr().write(|w| w.set_compare(ms));
-                LPTMR0.csr().write(|w| {
-                    w.set_tie(true);
-                    w.set_ten(true);
-                });
+                LPTMR0.csr().write(|w| w.set_ten(true));
+                // TIE must be set only after TEN. The hardware forbids changing CSR[5:1] in
+                // the write that enables the timer.
+                LPTMR0.csr().modify(|w| w.set_tie(true));
                 LLWU.me().modify(|w| w.set_wume(0, true));
-                timeout = true;
             }
         }
-    }
-    // Clear stale pin flags (write 1 to clear).
-    for i in 0..4 {
-        LLWU.pf(i).write(|w| w.0 = 0xFF);
     }
 
     SMC.stopctrl().modify(|w| {
@@ -298,19 +321,41 @@ pub fn stop(mode: LeakageMode, wake: &[Wake<'_>]) -> WakeReason {
         }
         Interrupt::LLWU.disable();
         Interrupt::LLWU.unpend();
-        Interrupt::LPTMR0.disable();
-        Interrupt::LPTMR0.unpend();
+        if timeout {
+            Interrupt::LPTMR0.disable();
+            Interrupt::LPTMR0.unpend();
+        }
         reason
     });
 
-    // Disarm everything and restore the idle sleep configuration.
-    for i in 0..8 {
-        LLWU.pe(i).write(|_| {});
+    // Restore the borrowed peripherals and the idle sleep configuration.
+    for (i, value) in pe_before.into_iter().enumerate() {
+        LLWU.pe(i).write_value(value);
     }
-    LLWU.me().write(|_| {});
-    if timeout {
+    LLWU.me().write_value(me_before);
+    if let Some((csr, psr, cmr)) = lptmr_before {
         LPTMR0.csr().write(|_| {});
+        LPTMR0.psr().write_value(psr);
+        LPTMR0.cmr().write_value(cmr);
+        LPTMR0.csr().write_value(csr);
+        if !lptmr_clock_before {
+            crate::clocks::disable::<peripherals::LPTMR0>();
+        }
     }
+
+    if llwu_irq_before.1 {
+        Interrupt::LLWU.pend();
+    }
+    if llwu_irq_before.0 {
+        unsafe { Interrupt::LLWU.enable() };
+    }
+    if lptmr_irq_before.1 {
+        Interrupt::LPTMR0.pend();
+    }
+    if lptmr_irq_before.0 {
+        unsafe { Interrupt::LPTMR0.enable() };
+    }
+
     SMC.stopctrl().modify(|w| w.set_pstopo(sleep_before.1));
     SMC.pmctrl().modify(|w| w.set_stopm(sleep_before.0));
     let _ = SMC.pmctrl().read();
@@ -330,8 +375,12 @@ pub fn woke_from_vlls() -> bool {
 /// flags follow their peripheral, which the reset does clear, so a wake with no pin flag while
 /// the LPTMR was armed is reported as [`WakeReason::Timeout`]. Reading the reason also clears
 /// the flags and disarms the wake sources, which must happen before
-/// [`release_io_after_vlls`] to keep a stale source from firing again. Call it once.
-pub fn vlls_wake_reason() -> Option<WakeReason> {
+/// [`release_io_after_vlls`] to keep a stale source from firing again. Pass the LPTMR0 token if
+/// the sleep used a timeout. Call this once.
+pub fn vlls_wake_reason(
+    _llwu: &mut Peri<'_, peripherals::LLWU>,
+    lptmr: Option<&mut Peri<'_, peripherals::LPTMR0>>,
+) -> Option<WakeReason> {
     if !woke_from_vlls() {
         return None;
     }
@@ -345,13 +394,25 @@ pub fn vlls_wake_reason() -> Option<WakeReason> {
         }
         LLWU.pf(i).write(|w| w.0 = 0xFF);
     }
-    if reason == WakeReason::Other && (LLWU.mf5().read().mwuf(0) || LLWU.me().read().wume(0)) {
+    let timeout_armed = LLWU.me().read().wume(0);
+    if reason == WakeReason::Other && (LLWU.mf5().read().mwuf(0) || timeout_armed) {
         reason = WakeReason::Timeout;
     }
     for i in 0..8 {
         LLWU.pe(i).write(|_| {});
     }
     LLWU.me().write(|_| {});
+    assert!(
+        !timeout_armed || lptmr.is_some(),
+        "an LPTMR0 token is required to disarm the VLLS timeout"
+    );
+    if timeout_armed {
+        crate::clocks::enable::<peripherals::LPTMR0>();
+        LPTMR0.csr().write(|_| {});
+        Interrupt::LPTMR0.disable();
+        Interrupt::LPTMR0.unpend();
+        crate::clocks::disable::<peripherals::LPTMR0>();
+    }
     Some(reason)
 }
 

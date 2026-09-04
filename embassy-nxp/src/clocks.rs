@@ -81,7 +81,7 @@ const FAST_IRC_HZ: u32 = 4_000_000;
 /// FLL multiplier with `DRST_DRS = 0` and `DMX32 = 0` (the reset configuration).
 const FLL_FACTOR_LOW: u32 = 640;
 /// Core clock limits in Run and High Speed Run mode.
-const RUN_MAX_CORE_HZ: u32 = 72_000_000;
+pub(crate) const RUN_MAX_CORE_HZ: u32 = 72_000_000;
 const HSRUN_MAX_CORE_HZ: u32 = 96_000_000;
 /// Maximum MCG output and PLL clock.
 const MAX_MCGOUT_HZ: u32 = 144_000_000;
