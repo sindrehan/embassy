@@ -15,16 +15,15 @@ use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_hal_internal::{PeripheralType, impl_peripheral};
 use embassy_sync::waitqueue::AtomicWaker;
 
-use crate::Peri;
 use crate::pac::dma::vals::Ssize;
 #[cfg(feature = "rt")]
 use crate::pac::interrupt;
 use crate::pac::{DMA, DMAMUX, Interrupt, SIM};
-use crate::peripherals;
+use crate::{Peri, peripherals};
 
 pub(crate) const CHANNEL_COUNT: usize = 8;
 /// Largest major loop count without channel linking (`CITER` is 15 bits).
-const MAX_TRANSFER: usize = 0x7FFF;
+pub(crate) const MAX_TRANSFER: usize = 0x7FFF;
 
 static WAKERS: [AtomicWaker; CHANNEL_COUNT] = [const { AtomicWaker::new() }; CHANNEL_COUNT];
 /// Channels whose transfer stopped with an error, one bit each. Only touched in critical sections.
@@ -82,11 +81,11 @@ fn DMA_ERROR() {
     critical_section::with(|_| {
         ERRORS.store(ERRORS.load(Ordering::Relaxed) | err, Ordering::Relaxed);
     });
-    for channel in 0..CHANNEL_COUNT {
+    for (channel, waker) in WAKERS.iter().enumerate() {
         if err & (1 << channel) != 0 {
             DMA.cerq().write(|w| w.set_cerq(channel as u8));
             DMA.cerr().write(|w| w.set_cerr(channel as u8));
-            WAKERS[channel].wake();
+            waker.wake();
         }
     }
 }
@@ -121,8 +120,22 @@ pub(crate) fn init() {
 ///
 /// `from` must be a peripheral data register and `to` valid, unaliased memory for the whole
 /// transfer. The peripheral must be set up to raise the request.
-pub unsafe fn read<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: *const W, to: *mut [W]) -> Transfer<'a, C> {
-    transfer_inner(ch, request, from as u32, to as *mut W as u32, to.len(), W::SIZE, false, true)
+pub unsafe fn read<'a, C: Channel, W: Word>(
+    ch: Peri<'a, C>,
+    request: u8,
+    from: *const W,
+    to: *mut [W],
+) -> Transfer<'a, C> {
+    transfer_inner(
+        ch,
+        request,
+        from as u32,
+        to as *mut W as u32,
+        to.len(),
+        W::SIZE,
+        false,
+        true,
+    )
 }
 
 /// Memory to peripheral: `from.len()` words from `from` into the register at `to`, one word per
@@ -132,8 +145,22 @@ pub unsafe fn read<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: 
 ///
 /// `to` must be a peripheral data register and `from` valid memory that stays unchanged for the
 /// whole transfer. The peripheral must be set up to raise the request.
-pub unsafe fn write<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: *const [W], to: *mut W) -> Transfer<'a, C> {
-    transfer_inner(ch, request, from as *const W as u32, to as u32, from.len(), W::SIZE, true, false)
+pub unsafe fn write<'a, C: Channel, W: Word>(
+    ch: Peri<'a, C>,
+    request: u8,
+    from: *const [W],
+    to: *mut W,
+) -> Transfer<'a, C> {
+    transfer_inner(
+        ch,
+        request,
+        from as *const W as u32,
+        to as u32,
+        from.len(),
+        W::SIZE,
+        true,
+        false,
+    )
 }
 
 /// Peripheral to nowhere: `count` words from the register at `from`, discarded. Useful to drain
@@ -142,8 +169,22 @@ pub unsafe fn write<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from:
 /// # Safety
 ///
 /// `from` must be a peripheral data register set up to raise the request.
-pub unsafe fn read_discard<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: *const W, count: usize) -> Transfer<'a, C> {
-    transfer_inner(ch, request, from as u32, &raw const SINK as u32, count, W::SIZE, false, false)
+pub unsafe fn read_discard<'a, C: Channel, W: Word>(
+    ch: Peri<'a, C>,
+    request: u8,
+    from: *const W,
+    count: usize,
+) -> Transfer<'a, C> {
+    transfer_inner(
+        ch,
+        request,
+        from as u32,
+        &raw const SINK as u32,
+        count,
+        W::SIZE,
+        false,
+        false,
+    )
 }
 
 /// One fixed word to a peripheral, `count` times. Useful to clock a receive-only transfer.
@@ -152,7 +193,13 @@ pub unsafe fn read_discard<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8
 ///
 /// `to` must be a peripheral data register set up to raise the request; `from` must stay valid
 /// and unchanged for the whole transfer.
-pub unsafe fn write_repeated<'a, C: Channel, W: Word>(ch: Peri<'a, C>, request: u8, from: *const W, to: *mut W, count: usize) -> Transfer<'a, C> {
+pub unsafe fn write_repeated<'a, C: Channel, W: Word>(
+    ch: Peri<'a, C>,
+    request: u8,
+    from: *const W,
+    to: *mut W,
+    count: usize,
+) -> Transfer<'a, C> {
     transfer_inner(ch, request, from as u32, to as u32, count, W::SIZE, false, false)
 }
 
@@ -170,7 +217,10 @@ fn transfer_inner<'a, C: Channel>(
     incr_src: bool,
     incr_dst: bool,
 ) -> Transfer<'a, C> {
-    assert!(len > 0 && len <= MAX_TRANSFER, "DMA: transfer length must be 1 to 32767 words");
+    assert!(
+        len > 0 && len <= MAX_TRANSFER,
+        "DMA: transfer length must be 1 to 32767 words"
+    );
     let n = ch.number() as usize;
     let bytes = 1u16 << size.to_bits();
 

@@ -17,18 +17,19 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_io::ErrorKind;
 
+use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
 use crate::interrupt::typelevel::{Binding, Interrupt};
+use crate::pac::SIM;
 use crate::pac::common::{RW, Reg};
 use crate::pac::lpuart::Lpuart as Regs;
-use crate::pac::port::regs::Pcr;
-use crate::pac::SIM;
 use crate::pac::lpuart::regs::{Data, Stat};
+use crate::pac::port::regs::Pcr;
 use crate::pac::port::vals::Mux;
-use crate::dma::{AnyChannel, Channel};
 use crate::{Async, Blocking, Mode};
 
 /// Write-1-to-clear flags in STAT: LBKDIF, RXEDGIF, IDLE, OR, NF, FE, PF, MA1F, MA2F.
@@ -139,6 +140,12 @@ impl State {
             tx_waker: AtomicWaker::new(),
             rx_waker: AtomicWaker::new(),
         }
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -347,10 +354,15 @@ impl<'d> LpuartTx<'d, Async> {
                 return Ok(());
             }
             regs.baud().modify(|w| w.set_tdmae(true));
-            let transfer = unsafe { crate::dma::write(channel.reborrow(), *request, buffer, regs.data().as_ptr() as *mut u8) };
-            let result = transfer.await;
+            let on_drop = OnDrop::new(move || regs.baud().modify(|w| w.set_tdmae(false)));
+            for chunk in buffer.chunks(MAX_TRANSFER) {
+                let transfer =
+                    unsafe { crate::dma::write(channel.reborrow(), *request, chunk, regs.data().as_ptr() as *mut u8) };
+                transfer.await.map_err(|_| Error::Dma)?;
+            }
             regs.baud().modify(|w| w.set_tdmae(false));
-            return result.map_err(|_| Error::Dma);
+            on_drop.defuse();
+            return Ok(());
         }
 
         let size = tx_fifo_size(regs);
@@ -510,10 +522,14 @@ impl<'d> LpuartRx<'d, Async> {
                 s.set_nf(true);
             });
             regs.baud().modify(|w| w.set_rdmae(true));
-            let transfer = unsafe { crate::dma::read(channel.reborrow(), *request, regs.data().as_ptr() as *const u8, buffer) };
-            let result = transfer.await;
+            let on_drop = OnDrop::new(move || regs.baud().modify(|w| w.set_rdmae(false)));
+            for chunk in buffer.chunks_mut(MAX_TRANSFER) {
+                let transfer =
+                    unsafe { crate::dma::read(channel.reborrow(), *request, regs.data().as_ptr() as *const u8, chunk) };
+                transfer.await.map_err(|_| Error::Dma)?;
+            }
             regs.baud().modify(|w| w.set_rdmae(false));
-            result.map_err(|_| Error::Dma)?;
+            on_drop.defuse();
             let stat = regs.stat().read();
             let error = if stat.or() {
                 Some(Error::Overrun)

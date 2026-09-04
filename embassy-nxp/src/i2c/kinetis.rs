@@ -15,12 +15,12 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal_1::i2c::Operation;
 
-use crate::dma::{AnyChannel, Channel};
-
+use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::common::{RW, Reg};
 use crate::pac::i2c::I2c as Regs;
@@ -113,6 +113,12 @@ impl State {
         Self {
             waker: AtomicWaker::new(),
         }
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -383,6 +389,16 @@ impl<'d, M: Mode> I2c<'d, M> {
 
     async fn transaction_inner(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
         let regs = self.info.regs;
+        let on_drop = OnDrop::new(move || {
+            regs.c1().modify(|w| {
+                w.set_iicie(false);
+                w.set_dmaen(false);
+                w.set_mst(false);
+                w.set_tx(false);
+                w.set_txak(false);
+            });
+            regs.s().write_value(S(0).with_iicif().with_arbl());
+        });
         let count = operations.len();
         let mut index = 0;
         let mut started = false;
@@ -402,14 +418,20 @@ impl<'d, M: Mode> I2c<'d, M> {
                             let (channel, request) = self.dma.as_mut().unwrap();
                             regs.c1().modify(|w| w.set_dmaen(true));
                             regs.d().write(|w| w.set_data(bytes[0]));
-                            let transfer = unsafe {
-                                crate::dma::write(channel.reborrow(), *request, &bytes[1..], regs.d().as_ptr() as *mut u8)
-                            };
-                            let result = transfer.await;
+                            let mut result = Ok(());
+                            for chunk in bytes[1..].chunks(MAX_TRANSFER) {
+                                let transfer = unsafe {
+                                    crate::dma::write(channel.reborrow(), *request, chunk, regs.d().as_ptr() as *mut u8)
+                                };
+                                if transfer.await.is_err() {
+                                    result = Err(Error::Dma);
+                                    break;
+                                }
+                            }
                             regs.c1().modify(|w| w.set_dmaen(false));
-                            if result.is_err() {
+                            if let Err(error) = result {
                                 self.stop().await;
-                                return Err(Error::Dma);
+                                return Err(error);
                             }
                             self.finish_byte_with(true, Error::DataNack).await?;
                         } else {
@@ -458,18 +480,26 @@ impl<'d, M: Mode> I2c<'d, M> {
                     let mut after_dma = false;
                     let mut skip = 0;
                     if run_end == index + 1 && remaining >= 3 && self.dma.is_some() {
-                        let Operation::Read(buffer) = &mut operations[index] else { unreachable!() };
+                        let Operation::Read(buffer) = &mut operations[index] else {
+                            unreachable!()
+                        };
                         let (channel, request) = self.dma.as_mut().unwrap();
                         let count = remaining - 2;
                         regs.c1().modify(|w| w.set_dmaen(true));
-                        let transfer = unsafe {
-                            crate::dma::read(channel.reborrow(), *request, regs.d().as_ptr() as *const u8, &mut buffer[..count])
-                        };
-                        let result = transfer.await;
+                        let mut result = Ok(());
+                        for chunk in buffer[..count].chunks_mut(MAX_TRANSFER) {
+                            let transfer = unsafe {
+                                crate::dma::read(channel.reborrow(), *request, regs.d().as_ptr() as *const u8, chunk)
+                            };
+                            if transfer.await.is_err() {
+                                result = Err(Error::Dma);
+                                break;
+                            }
+                        }
                         regs.c1().modify(|w| w.set_dmaen(false));
-                        if result.is_err() {
+                        if let Err(error) = result {
                             self.stop().await;
-                            return Err(Error::Dma);
+                            return Err(error);
                         }
                         skip = count;
                         remaining -= count;
@@ -514,6 +544,7 @@ impl<'d, M: Mode> I2c<'d, M> {
         if started && !stopped {
             self.stop().await;
         }
+        on_drop.defuse();
         Ok(())
     }
 }

@@ -13,12 +13,12 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
+use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 pub use embedded_hal_1::spi::{Phase, Polarity};
 
-use crate::dma::{AnyChannel, Channel};
-
+use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::common::{RW, Reg};
 use crate::pac::port::regs::Pcr;
@@ -115,6 +115,12 @@ impl State {
     }
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// SPI master driver.
 pub struct Spi<'d, M: Mode> {
     info: &'static Info,
@@ -133,17 +139,22 @@ struct Dma<'d> {
 
 /// `DBR`, `PBR`, `BR` for the highest SCK rate not above `frequency`, like the SDK.
 fn baud_divisors(bus_hz: u32, frequency: u32) -> (bool, Pbr, u8) {
-    let mut best = (u32::MAX, false, 0u8, 0u8);
+    assert!(frequency != 0, "SPI frequency must be greater than zero");
+    let mut best: Option<(u32, bool, u8, u8)> = None;
     for (pbr, &prescaler) in PRESCALERS.iter().enumerate() {
         for (br, &scaler) in SCALERS.iter().enumerate() {
             for dbr in 1..=2u32 {
                 let rate = (bus_hz as u64 * dbr as u64 / (prescaler as u64 * scaler as u64)) as u32;
-                if rate <= frequency && frequency - rate < best.0 {
-                    best = (frequency - rate, dbr == 2, pbr as u8, br as u8);
+                if rate <= frequency {
+                    let error = frequency - rate;
+                    if best.is_none_or(|(best_error, ..)| error < best_error) {
+                        best = Some((error, dbr == 2, pbr as u8, br as u8));
+                    }
                 }
             }
         }
     }
+    let best = best.unwrap_or_else(|| panic!("requested SPI frequency is below the hardware minimum"));
     (best.1, Pbr::from_bits(best.2), best.3)
 }
 
@@ -377,13 +388,48 @@ impl<'d, M: Mode> Spi<'d, M> {
     }
 
     async fn transfer_in_place_inner(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        // Frames come back in order and never more than the FIFO depth behind, so reading into
-        // the slot that was just sent from is safe.
+        let regs = self.info.regs;
+        let depth = self.info.fifo_depth as usize;
         let len = data.len();
-        let ptr = data.as_mut_ptr();
-        let write = unsafe { core::slice::from_raw_parts(ptr, len) };
-        let read = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-        self.transfer_inner(read, write).await
+        if len == 0 {
+            return Ok(());
+        }
+
+        regs.mcr().modify(|w| {
+            w.set_clr_txf(true);
+            w.set_clr_rxf(true);
+        });
+        regs.sr().write_value(Sr(SR_W1C));
+
+        // Keep the accesses sequenced through the one mutable slice. A received byte cannot
+        // overwrite a byte that has not already been queued for transmission.
+        let mut sent = 0;
+        let mut received = 0;
+        while received < len {
+            while sent < len && sent - received < depth && (regs.sr().read().txctr() as usize) < depth {
+                let byte = data[sent];
+                regs.pushr().write(|w| {
+                    w.set_txdata(byte as u16);
+                    w.set_pcs(Pcs::from_bits(0));
+                    w.set_ctas(Ctas::_000);
+                });
+                sent += 1;
+            }
+
+            self.wait_rx().await;
+
+            while received < sent && regs.sr().read().rxctr() != 0 {
+                data[received] = regs.popr().read().rxdata() as u8;
+                regs.sr().write_value(Sr(0).with_rfdf());
+                received += 1;
+            }
+        }
+
+        if regs.sr().read().rfof() {
+            regs.sr().write_value(Sr(0).with_rfof());
+            return Err(Error::Overrun);
+        }
+        Ok(())
     }
 
     /// Full-duplex transfer with the DMA channels: one channel feeds PUSHR's data byte on every
@@ -404,7 +450,7 @@ impl<'d, M: Mode> Spi<'d, M> {
             if read.len() == len {
                 crate::dma::read(dma.rx.reborrow(), dma.rx_request, popr, read)
             } else {
-                assert!(read.is_empty(), "read slice must be empty or full length");
+                debug_assert!(read.is_empty());
                 crate::dma::read_discard::<_, u8>(dma.rx.reborrow(), dma.rx_request, popr, len)
             }
         };
@@ -412,7 +458,7 @@ impl<'d, M: Mode> Spi<'d, M> {
             if write.len() == len {
                 crate::dma::write(dma.tx.reborrow(), dma.tx_request, write, pushr)
             } else {
-                assert!(write.is_empty(), "write slice must be empty or full length");
+                debug_assert!(write.is_empty());
                 crate::dma::write_repeated(dma.tx.reborrow(), dma.tx_request, &raw const DUMMY_BYTE, pushr, len)
             }
         };
@@ -423,8 +469,10 @@ impl<'d, M: Mode> Spi<'d, M> {
             w.set_tfff_re(true);
             w.set_tfff_dirs(true);
         });
+        let on_drop = OnDrop::new(move || regs.rser().write(|_| {}));
         let (rx, tx) = embassy_futures::join::join(rx, tx).await;
         regs.rser().write(|_| {});
+        on_drop.defuse();
 
         if rx.is_err() || tx.is_err() {
             return Err(Error::Dma);
@@ -451,7 +499,30 @@ impl<'d, M: Mode> Spi<'d, M> {
         regs.sr().write_value(Sr(SR_W1C));
 
         if self.dma.is_some() {
-            return self.transfer_dma(read, write, len).await;
+            let mut offset = 0;
+            while offset < len {
+                let mut chunk_len = (len - offset).min(MAX_TRANSFER);
+                if offset < read.len() {
+                    chunk_len = chunk_len.min(read.len() - offset);
+                }
+                if offset < write.len() {
+                    chunk_len = chunk_len.min(write.len() - offset);
+                }
+
+                let read_chunk = if offset < read.len() {
+                    &mut read[offset..offset + chunk_len]
+                } else {
+                    &mut []
+                };
+                let write_chunk = if offset < write.len() {
+                    &write[offset..offset + chunk_len]
+                } else {
+                    &[]
+                };
+                self.transfer_dma(read_chunk, write_chunk, chunk_len).await?;
+                offset += chunk_len;
+            }
+            return Ok(());
         }
 
         let mut sent = 0;
@@ -531,6 +602,26 @@ impl SrWith for Sr {
     fn with_rfof(mut self) -> Self {
         self.set_rfof(true);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baud_rate_does_not_exceed_request() {
+        let bus_hz = 24_000_000;
+        let requested = 1_000_000;
+        let (dbr, pbr, br) = baud_divisors(bus_hz, requested);
+        let rate = bus_hz * if dbr { 2 } else { 1 } / (PRESCALERS[pbr.to_bits() as usize] * SCALERS[br as usize]);
+        assert!(rate <= requested);
+    }
+
+    #[test]
+    #[should_panic(expected = "below the hardware minimum")]
+    fn rejects_unrepresentable_low_baud_rate() {
+        baud_divisors(24_000_000, 100);
     }
 }
 
