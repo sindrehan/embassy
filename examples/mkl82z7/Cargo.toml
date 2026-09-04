@@ -12,7 +12,7 @@ cortex-m-semihosting = "0.5"
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
-embassy-nxp = { version = "0.1.0", path = "../../embassy-nxp", features = ["defmt", "mkl82z7", "unstable-pac", "time-driver-tpm", "executor-thread"] }
+embassy-nxp = { version = "0.1.0", path = "../../embassy-nxp", features = ["defmt", "mkl82z7", "unstable-pac", "time", "time-driver-tpm", "executor-thread"] }
 embassy-executor = { version = "0.10.0", path = "../../embassy-executor", features = ["defmt"] }
 embassy-time = { version = "0.5.1", path = "../../embassy-time", features = ["defmt", "tick-hz-1_000_000"] }
 embassy-hal-internal = { version = "0.5.0", path = "../../embassy-hal-internal" }

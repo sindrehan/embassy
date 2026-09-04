@@ -42,8 +42,8 @@ the reset clock configuration.
 - `lpuart_loopback`: tests interrupt-driven and blocking LPUART transfers with
   internal loopback enabled.
 - `lpuart_dma`: tests DMA-backed LPUART transfers with internal loopback.
-- `i2c_accel`: reads the onboard accelerometer with blocking, interrupt-driven,
-  and DMA-backed I2C transfers.
+- `i2c_accel`: checks timeout recovery, then reads the onboard accelerometer
+  with blocking, interrupt-driven, and DMA-backed I2C transfers.
 - `spi_loopback`: tests blocking, interrupt-driven, and DMA-backed SPI
   transfers; connect D11 to D12.
 - `spi_link_master` and `spi_link_slave`: exchange checked frames between two

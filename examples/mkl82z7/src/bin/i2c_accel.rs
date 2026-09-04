@@ -1,15 +1,17 @@
 //! Talks to the FXOS8700CQ accelerometer/magnetometer on the FRDM-KL82Z over
 //! I2C0 (PTD2 = SCL, PTD3 = SDA, address 0x1C): checks WHO_AM_I, then streams
 //! acceleration samples, first with the interrupt-driven driver and then with
-//! the DMA-assisted one.
+//! the DMA-assisted one. One transfer selects VLPS to exercise the driver's
+//! active-transfer sleep guard.
 #![no_std]
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_nxp::i2c::{Config, I2c, InterruptHandler};
+use embassy_nxp::i2c::{Config, Error, I2c, InterruptHandler};
+use embassy_nxp::power::{self, SleepMode};
 use embassy_nxp::{bind_interrupts, peripherals};
 use embassy_nxp_mkl82z7_examples as _;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 
 bind_interrupts!(struct Irqs {
     I2C0 => InterruptHandler<peripherals::I2C0>;
@@ -28,13 +30,30 @@ async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("i2c: FXOS8700CQ on I2C0 (PTD2 SCL, PTD3 SDA) at 100 kHz");
 
-    let mut i2c = I2c::new(p.I2C0, p.PTD2, p.PTD3, Irqs, Config::default());
+    let mut i2c0 = p.I2C0;
+    let mut scl = p.PTD2;
+    let mut sda = p.PTD3;
+    let mut config = Config::default();
+    config.timeout = Duration::from_millis(5);
+
+    // Abort an address transfer before one byte can finish, then recover and release the driver.
+    let mut timeout_config = config.clone();
+    timeout_config.timeout = Duration::from_micros(25);
+    let mut i2c = I2c::new(i2c0.reborrow(), scl.reborrow(), sda.reborrow(), Irqs, timeout_config);
+    defmt::assert_eq!(i2c.write(FXOS8700, &[REG_WHO_AM_I]).await, Err(Error::Timeout));
+    i2c.recover_bus().unwrap();
+    drop(i2c);
+    defmt::info!("timeout and bus recovery passed");
+
+    let mut i2c = I2c::new(i2c0.reborrow(), scl.reborrow(), sda.reborrow(), Irqs, config.clone());
 
     // Blocking and async paths against the same register.
     let mut id = [0u8; 1];
     i2c.blocking_write_read(FXOS8700, &[REG_WHO_AM_I], &mut id).unwrap();
     defmt::info!("WHO_AM_I (blocking) = {:#04x}", id[0]);
+    power::set_sleep_mode(SleepMode::VeryLowPowerStop);
     i2c.write_read(FXOS8700, &[REG_WHO_AM_I], &mut id).await.unwrap();
+    power::set_sleep_mode(SleepMode::Wait);
     defmt::info!("WHO_AM_I (async)    = {:#04x}", id[0]);
     defmt::assert_eq!(id[0], WHO_AM_I, "unexpected WHO_AM_I");
 
@@ -59,16 +78,10 @@ async fn main(_spawner: Spawner) {
     }
     drop(i2c);
 
-    // The same over DMA: 2-byte writes send the second byte by DMA, the 6-byte read moves four
-    // bytes by DMA and the last two by hand.
-    let (i2c0, scl, sda) = unsafe {
-        (
-            peripherals::I2C0::steal(),
-            peripherals::PTD2::steal(),
-            peripherals::PTD3::steal(),
-        )
-    };
-    let mut i2c = I2c::new_with_dma(i2c0, scl, sda, Irqs, p.DMA_CH0, Config::default());
+    // Dropping the interrupt-driven driver releases its peripheral and pins, so the same owned
+    // resources can be used safely by the DMA driver. Two-byte writes send the second byte by DMA;
+    // the six-byte read moves four bytes by DMA and the last two by hand.
+    let mut i2c = I2c::new_with_dma(i2c0, scl, sda, Irqs, p.DMA_CH0, config);
     let mut id = [0u8; 1];
     i2c.write_read(FXOS8700, &[REG_WHO_AM_I], &mut id).await.unwrap();
     defmt::assert_eq!(id[0], WHO_AM_I, "unexpected WHO_AM_I over DMA driver");
