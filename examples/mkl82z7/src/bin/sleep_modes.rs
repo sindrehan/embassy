@@ -57,7 +57,10 @@ async fn main(_spawner: Spawner) {
         SleepMode::Wait,
     ] {
         power::set_sleep_mode(mode);
-        log(&mut uart, format_args!("mode {:?} (reads back {:?}): start", mode, power::sleep_mode()));
+        log(
+            &mut uart,
+            format_args!("mode {:?} (reads back {:?}): start", mode, power::sleep_mode()),
+        );
         let start = Instant::now();
         for _ in 0..10 {
             led.toggle();

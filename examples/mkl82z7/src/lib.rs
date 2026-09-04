@@ -10,9 +10,9 @@ use panic_probe as _;
 /// Bytes 0..8: backdoor comparison key (unused).
 /// Bytes 8..12: FPROT3..FPROT0, 0xFF = no flash protection.
 /// Byte 12: FSEC = 0xFE, security disabled, mass erase enabled.
-/// Byte 13: FOPT = 0x3D, boot from flash (BOOTSRC_SEL = 0), NMI disabled,
-///          RESET pin enabled, fast init, LPBOOT = full speed.
-///          The reset value 0xFF would select the boot ROM instead of flash.
+/// Byte 13: FOPT = 0x3D. BOOTSRC_SEL selects internal flash, BOOTPIN_OPT lets
+///          BOOTCFG0 request the ROM updater, NMI is enabled, initialization is
+///          fast, and LPBOOT selects RUN after reset.
 /// Bytes 14..16: reserved.
 #[used]
 #[unsafe(no_mangle)]
@@ -27,8 +27,7 @@ pub static FLASH_CONFIG: [u8; 16] = [
 
 /// Runs a fixed busy loop and returns how long it took in microseconds, as
 /// measured by `embassy-time`. The time driver runs from the internal
-/// reference clock, so the result scales with the core clock: about 3.4 times
-/// shorter at 72 MHz than on the 21 MHz reset configuration.
+/// reference clock, so the result scales with the core clock.
 #[inline(never)]
 pub fn spin_benchmark() -> u64 {
     let start = embassy_time::Instant::now();
@@ -38,7 +37,7 @@ pub fn spin_benchmark() -> u64 {
     start.elapsed().as_micros()
 }
 
-/// Terminates the `probe-rs run` session with a success exit code.
+/// Terminates a semihosting debugger session with a success exit code.
 ///
 /// Only meaningful with a debugger attached; without one the semihosting
 /// breakpoint escalates to a HardFault.

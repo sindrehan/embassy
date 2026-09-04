@@ -27,7 +27,10 @@ async fn main(_spawner: Spawner) {
     let mut out = Output::new(p.PTC6, Level::Low);
     let mut inp = Input::new(p.PTC7, Pull::None);
     Timer::after_millis(1).await;
-    defmt::assert!(inp.is_low(), "jumper D11-D12 missing? input should follow the low output");
+    defmt::assert!(
+        inp.is_low(),
+        "jumper D11-D12 missing? input should follow the low output"
+    );
 
     // Level waits that already hold return at once.
     let t = Instant::now();
@@ -57,9 +60,12 @@ async fn main(_spawner: Spawner) {
                 _ => inp.wait_for_low().await,
             }
         };
-        with_timeout(Duration::from_millis(500), join(flip_after(&mut out, level, 50), waiter))
-            .await
-            .expect("pin interrupt never fired");
+        with_timeout(
+            Duration::from_millis(500),
+            join(flip_after(&mut out, level, 50), waiter),
+        )
+        .await
+        .expect("pin interrupt never fired");
         let ms = t.elapsed().as_millis();
         defmt::assert!((49..=52).contains(&ms), "{} woke after {} ms, expected ~50", name, ms);
         defmt::assert_eq!(inp.read(), level);
@@ -75,9 +81,12 @@ async fn main(_spawner: Spawner) {
 
     // The dropped future left the pin interrupt disarmed; a later wait still works.
     let t = Instant::now();
-    with_timeout(Duration::from_millis(500), join(flip_after(&mut out, Level::High, 50), inp.wait_for_rising_edge()))
-        .await
-        .expect("pin interrupt never fired after a cancelled wait");
+    with_timeout(
+        Duration::from_millis(500),
+        join(flip_after(&mut out, Level::High, 50), inp.wait_for_rising_edge()),
+    )
+    .await
+    .expect("pin interrupt never fired after a cancelled wait");
     defmt::info!("wait after cancel: woke after {} ms", t.elapsed().as_millis());
 
     defmt::info!("gpio irq passed");

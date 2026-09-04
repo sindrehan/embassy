@@ -28,7 +28,13 @@ fn loopback(regs: pac::lpuart::Lpuart) {
     regs.ctrl().modify(|w| w.set_re(true));
 }
 
-async fn check<'d>(name: &str, uart: Lpuart<'d, embassy_nxp::Async>, regs: pac::lpuart::Lpuart, tx_buf: &[u8], rx_buf: &mut [u8]) {
+async fn check<'d>(
+    name: &str,
+    uart: Lpuart<'d, embassy_nxp::Async>,
+    regs: pac::lpuart::Lpuart,
+    tx_buf: &[u8],
+    rx_buf: &mut [u8],
+) {
     loopback(regs);
     let (mut tx, mut rx) = uart.split();
     let start = Instant::now();
@@ -62,7 +68,14 @@ async fn main(_spawner: Spawner) {
         p.DMA_CH1,
         lpuart::Config::default(),
     );
-    check("LPUART2 at 115200", uart, pac::LPUART2, &pattern[..256], &mut got[..256]).await;
+    check(
+        "LPUART2 at 115200",
+        uart,
+        pac::LPUART2,
+        &pattern[..256],
+        &mut got[..256],
+    )
+    .await;
 
     let mut config = lpuart::Config::default();
     config.baudrate = 1_000_000;

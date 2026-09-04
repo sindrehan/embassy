@@ -63,7 +63,11 @@ async fn main(_spawner: Spawner) {
     defmt::info!("LPUART2: 64 bytes looped back through INTMUX0");
 
     let vec = pac::INTMUX0.ch_vec(0).read().vecn();
-    defmt::info!("INTMUX0 CH0 IER = {:#010x}, VEC = {}", pac::INTMUX0.ch_ier_31_0(0).read().0, vec);
+    defmt::info!(
+        "INTMUX0 CH0 IER = {:#010x}, VEC = {}",
+        pac::INTMUX0.ch_ier_31_0(0).read().0,
+        vec
+    );
     defmt::info!("intmux passed");
     embassy_nxp_mkl82z7_examples::exit()
 }

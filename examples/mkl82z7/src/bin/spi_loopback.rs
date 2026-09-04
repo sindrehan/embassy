@@ -37,7 +37,10 @@ async fn main(_spawner: Spawner) {
     if got == pattern {
         defmt::info!("async transfer, 64 bytes at 1 MHz: ok");
     } else {
-        defmt::error!("async transfer mismatch, first bytes {:#04x} (jumper D11-D12 missing?)", got[..4]);
+        defmt::error!(
+            "async transfer mismatch, first bytes {:#04x} (jumper D11-D12 missing?)",
+            got[..4]
+        );
         ok = false;
     }
 

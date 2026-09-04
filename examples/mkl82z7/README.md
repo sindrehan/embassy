@@ -1,131 +1,57 @@
-# MKL82Z7 (Kinetis KL82) examples
+# MKL82Z7 examples
 
-Tested on the FRDM-KL82Z. The onboard OpenSDA debugger runs SEGGER J-Link
-firmware (USB 1366:1015). `cargo run` uses probe-rs, which needs the MKL82Z7
-family target (added to probe-rs in September 2026):
+These examples target the NXP FRDM-KL82Z board. The default runner uses
+probe-rs with the onboard J-Link-compatible OpenSDA probe:
 
 ```sh
 cargo run --bin blinky
-cargo run --bin hello
 ```
 
-The examples go through `embassy-nxp` with the `mkl82z7` feature. The HAL
-disables the watchdog in `__pre_init`, `init` gates on the PORT clocks, and other peripheral
-clocks are opened with `embassy_nxp::clocks::enable::<peripherals::X>()`. The
-`time-driver-tpm` feature runs `embassy-time` at 1 MHz from TPM0, clocked by the
-4 MHz fast internal reference, so it is independent of the core clock setup.
+The runner connects under reset so that firmware which enters a low-power mode
+can still be replaced.
 
-`Config::clocks` selects the system clocks. `hello` stays on the reset
-configuration (FLL from the slow internal reference, 21 MHz core). `blinky`
-uses `ClockConfig::pll` with the board's 12 MHz crystal: PLL at 144 MHz, 72 MHz
-core, 24 MHz bus and flash. Both print the resulting clocks and a busy-loop
-benchmark, which runs about 3.4 times faster on the PLL (72 over 21 MHz).
+## Board connections
 
-## GPIO interrupts
+- The RGB LED is active low: red PTC1, green PTC2, blue PTC0.
+- SW2 is active low on PTA4/NMI.
+- SW3 is active low on PTD0/LLWU_P12.
+- The OpenSDA virtual serial port is connected to LPUART0 on PTB17 (TX) and
+  PTB16 (RX).
+- The FXOS8700CQ accelerometer is connected to I2C0 on PTD2 (SCL) and PTD3
+  (SDA), at address `0x1c`.
+- SPI0 is available on PTC5 (SCK, D13), PTC6 (SOUT, D11), and PTC7 (SIN,
+  D12). Connect D11 to D12 for the loopback example.
 
-`Input` and `Flex` have `wait_for_high`, `wait_for_low` and the edge waits,
-backed by the per-pin PORT interrupts (one NVIC line per port, owned by the
-HAL), plus the embedded-hal `Wait` and digital traits. `gpio_irq` checks them
-through the D11 to D12 jumper: PTC6 drives, PTC7 waits, and each wait is timed
-against a 50 ms flip. For a real button, SW3 is PTD0 and SW2 is PTA4, both
-active low with `Pull::Up`.
+The board uses a 12 MHz crystal. Examples which call `ClockConfig::pll()` run
+the core at 72 MHz and the bus and flash clocks at 24 MHz. Other examples use
+the reset clock configuration.
 
-## Serial
+## Examples
 
-`serial` echoes on LPUART0 (PTB17 TX, PTB16 RX, 115200 8N1), which the board
-routes to the OpenSDA virtual COM port and to Arduino D1/D0. The J-Link OpenSDA
-firmware enumerates a CDC ACM interface, `/dev/ttyACM0` on Linux (it needs the
-`cdc_acm` module, which is missing until a reboot after a kernel update). A
-quick check with pyserial at 115200: a `heartbeat N` line arrives every second
-and anything sent comes back. For an external 3.3 V adapter
-use LPUART1 on PTC4 (TX, Arduino D10 / J2 pin 6) and PTC3 (RX, Arduino D6 /
-J1 pin 14) instead; the example says which two lines to change.
+- `blinky`: blinks the RGB LED with the PLL clock configuration.
+- `hello`: reports the configured clocks and runs a short CPU benchmark.
+- `gpio_irq`: exercises GPIO edge and level waits; connect D11 to D12.
+- `serial`: echoes bytes on the OpenSDA virtual serial port at 115200 baud.
+- `lpuart_loopback`: tests interrupt-driven and blocking LPUART transfers with
+  internal loopback enabled.
+- `lpuart_dma`: tests DMA-backed LPUART transfers with internal loopback.
+- `i2c_accel`: reads the onboard accelerometer with blocking, interrupt-driven,
+  and DMA-backed I2C transfers.
+- `spi_loopback`: tests blocking, interrupt-driven, and DMA-backed SPI
+  transfers; connect D11 to D12.
+- `intmux`: routes I2C1 and LPUART2 through an INTMUX channel.
+- `sleep_modes`: exercises the idle sleep modes in RUN and VLPR.
+- `low_power`: enters VLPS, LLS3, and VLLS3, waking from SW3 or an LPTMR
+  timeout. VLLS wakeup resets the MCU, and the example reports the retained
+  wake source after restart.
 
-`lpuart_loopback` needs no wiring: it puts LPUART0 in internal loopback and
-checks 64 bytes through the async API at 115200 and the blocking API at 9600,
-then exits. LPUART2 has no NVIC vector of its own; it reaches the core through
-INTMUX0 channel 0, so its handler binds to `INTMUX0_0` (see `intmux`). It also
-has only a 1-byte receive buffer, so without DMA keep it to modest baud rates.
+The LPUART clock must remain active for asynchronous serial reception in STOP
+or VLPS. The supplied configurations use the fast internal reference clock
+when appropriate.
 
-## DMA
+## Flash configuration
 
-`lpuart_dma` moves LPUART data with eDMA channels (`Lpuart::new_with_dma`,
-one channel per direction, any of `DMA_CH0` to `DMA_CH7`): LPUART2, whose
-1-byte FIFO overruns at 115200 in interrupt mode, runs 256 bytes at 115200 at
-wire speed, then LPUART0 does 1024 bytes at 1 Mbaud, both through internal
-loopback. The DMA interrupts belong to the HAL; nothing needs binding.
-
-## I2C
-
-`i2c_accel` reads the on-board FXOS8700CQ accelerometer over I2C0 (PTD2 SCL,
-PTD3 SDA, address 0x1C): WHO_AM_I through the blocking and the async API, a
-deliberate NACK from an empty address, then a few acceleration samples, and
-repeats the register traffic through `I2c::new_with_dma`, where the middle of
-each run moves by DMA and the bytes that steer ACK and STOP stay in software.
-
-## SPI
-
-`spi_loopback` drives SPI0 on the Arduino header: SCK PTC5 (D13), SOUT PTC6
-(D11), SIN PTC7 (D12). Jumper D11 to D12 and it checks 64 bytes through the
-async API at 1 MHz and the blocking API at 8 MHz, then the DMA-fed driver
-(`Spi::new_with_dma`, two channels) with 64 bytes at 1 MHz and 1024 bytes at
-8 MHz. The driver does not drive a chip select; use a GPIO (for example `embassy_embedded_hal::SpiDevice`). SPI0
-has a 4-deep FIFO, SPI1 a single entry and its interrupt goes through INTMUX0.
-
-## INTMUX0
-
-`intmux` shows the peripherals without an NVIC line of their own: I2C1 and
-LPUART2 both bind to `INTMUX0_0` on one `bind_interrupts!` line. I2C1 (PTC10,
-PTC11, nothing attached) gets its address NACK through the mux and LPUART2
-loops 64 bytes back at 9600 baud, each under a deadline so a lost interrupt
-fails instead of hanging.
-
-## Power modes
-
-`Config::clocks.run_mode` and `ClockConfig::vlpr()` select VLPR (4 MHz fast
-IRC, 1 MHz flash, LPUART moves to the 4 MHz IRC because the 48 MHz one is
-off). `Config::power.sleep_mode` picks what the executor's idle enters: WAIT,
-partial stop 1 or 2, STOP or VLPS; the TPM tick keeps running in all of them.
-`power::stop` enters LLS3 or a VLLS mode with LLWU pin and LPTMR timeout wake
-sources; VLLS exits through a reset, see `power::vlls_wake_reason` (the LLWU
-keeps its flags through that reset) and `power::release_io_after_vlls`. `low_power` runs through VLPR plus VLPS idle,
-LLS3 and VLLS3 with SW3 (PTD0) and a 5 s timeout as wake sources, and
-`sleep_modes` walks every idle mode timing ten 250 ms timers (2500 ms in each,
-in RUN and in VLPR). Both log over LPUART0.
-
-The debug port does not answer while the core is in any stop mode. A probe-rs
-session polling RTT then errors out, and its shutdown halts or resets the
-target, which looks like the firmware hanging. So for these examples flash and
-start the chip without keeping a session: `probe-rs download` and `probe-rs
-reset`, or J-Link `loadbin` plus `r`, `g`, and read the serial port. Reflashing
-a chip that sleeps in VLPS needs the reset line: the runner in
-`.cargo/config.toml` passes `--connect-under-reset` for that reason.
-
-## Chip quirks handled here
-
-- **Flash configuration field at 0x400..0x40F.** `memory.x` places the
-  `.flash_config` section from `src/lib.rs` there (FSEC = 0xFE unsecured,
-  FOPT = 0x3D boot from flash) and starts `.text` at 0x410 so code never spills
-  into it. FOPT = 0xFF would boot from the ROM bootloader; an FSEC other than
-  0xFE secures the part.
-- **Watchdog runs out of reset** with roughly a 0.5 s timeout, and there is a
-  much tighter rule on top: after a debugger halts the core at the reset vector
-  and resumes it, the first unlock word must be written within the 256 bus cycle
-  watchdog configuration time or the chip resets (RM 28.4.2, "WCT"). Disabling
-  it from `main` is already too late, so `embassy-nxp` does it from
-  cortex-m-rt's `__pre_init` hook, before RAM initialisation. probe-rs exposes
-  this; J-Link hides it because it disables the watchdog itself after reset.
-- **RAM starts at 0x1FFFA000.** SRAM_L and SRAM_U are contiguous 96 KiB.
-- **Recovering a reset-looping or secured chip.** While the chip keeps
-  resetting (for example firmware that forgot the watchdog, or a loop of
-  software resets) the AHB-AP answers FAULT. probe-rs's KL82 sequence notices
-  this during attach and recovers through the MDM-AP, which stays reachable, so
-  a plain `cargo run` reflashes it. A secured part is unlocked the same way by
-  `probe-rs erase --chip MKL82Z128VLK7 --protocol swd`, which mass erases the
-  flash; the next flash clears the ROM's sticky FORCEROM flag so the new
-  firmware boots. No J-Link needed.
-
-## FRDM-KL82Z board
-
-- RGB LED, active low: red PTC1, green PTC2, blue PTC0.
-- SW2 on PTA4 (NMI), SW3 on PTD0 (LLWU_P12).
+`memory.x` reserves the flash configuration field at `0x400..0x40f`. The value
+in `src/lib.rs` leaves the device unsecured, enables mass erase, boots from
+internal flash unless BOOTCFG0 requests the ROM updater, enables NMI, selects
+fast initialization, and enters RUN after reset.

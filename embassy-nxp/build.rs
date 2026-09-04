@@ -7,9 +7,9 @@ use cfg_aliases::cfg_aliases;
 use nxp_pac::metadata;
 use nxp_pac::metadata::{METADATA, Peripheral};
 #[allow(unused)]
-use proc_macro2::TokenStream;
-#[allow(unused)]
 use proc_macro2::Literal;
+#[allow(unused)]
+use proc_macro2::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::format_ident;
 #[allow(unused)]

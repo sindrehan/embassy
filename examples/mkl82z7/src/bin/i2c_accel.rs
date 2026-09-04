@@ -61,7 +61,13 @@ async fn main(_spawner: Spawner) {
 
     // The same over DMA: 2-byte writes send the second byte by DMA, the 6-byte read moves four
     // bytes by DMA and the last two by hand.
-    let (i2c0, scl, sda) = unsafe { (peripherals::I2C0::steal(), peripherals::PTD2::steal(), peripherals::PTD3::steal()) };
+    let (i2c0, scl, sda) = unsafe {
+        (
+            peripherals::I2C0::steal(),
+            peripherals::PTD2::steal(),
+            peripherals::PTD3::steal(),
+        )
+    };
     let mut i2c = I2c::new_with_dma(i2c0, scl, sda, Irqs, p.DMA_CH0, Config::default());
     let mut id = [0u8; 1];
     i2c.write_read(FXOS8700, &[REG_WHO_AM_I], &mut id).await.unwrap();

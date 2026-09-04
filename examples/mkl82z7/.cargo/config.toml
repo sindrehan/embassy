@@ -2,8 +2,7 @@
 target = "thumbv6m-none-eabi"
 
 [target.thumbv6m-none-eabi]
-# The FRDM-KL82Z OpenSDA runs J-Link firmware. Needs a probe-rs with the
-# MKL82Z7 family (target added in September 2026).
+# The FRDM-KL82Z OpenSDA probe can run J-Link-compatible firmware.
 runner = "probe-rs run --chip MKL82Z128VLK7 --protocol swd --connect-under-reset"
 rustflags = [
     "-C", "link-arg=-Tlink.x",
