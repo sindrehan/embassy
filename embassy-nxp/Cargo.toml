@@ -44,16 +44,13 @@ embedded-hal-02 = { package = "embedded-hal", version = "0.2.6", features = ["un
 embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
 embedded-hal-async = { version = "1.0" }
 ## Chip dependencies
-# TODO: switch back to the embassy-rs/nxp-pac git dependency once the mkl82z7
-# feature and metadata are upstream. Until then this points at a local checkout of
-# https://github.com/sindrehan/nxp-pac, branch `mkl82z7`.
-nxp-pac = { version = "0.1.0", optional = true, path = "../../nxp-pac/nxp-pac" }
+nxp-pac = { version = "0.1.0", optional = true, git = "https://github.com/sindrehan/nxp-pac", rev = "9385591565a67d7cb5395be97260333a3353be1f" }
 
 imxrt-rt = { version = "0.1.7", optional = true, features = ["device"] }
 
 [build-dependencies]
 cfg_aliases = "0.2.1"
-nxp-pac = { version = "0.1.0", path = "../../nxp-pac/nxp-pac", default-features = false, features = ["metadata"] }
+nxp-pac = { version = "0.1.0", git = "https://github.com/sindrehan/nxp-pac", rev = "9385591565a67d7cb5395be97260333a3353be1f", default-features = false, features = ["metadata"] }
 proc-macro2 = "1.0.95"
 quote = "1.0.15"
 
