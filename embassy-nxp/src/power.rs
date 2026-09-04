@@ -161,10 +161,16 @@ fn apply_sleep_mode(mode: SleepMode, pll: bool) {
         );
     }
 
-    // Keep the selected IRC and, in PEE, the PLL alive through stop.
-    MCG.c1().modify(|w| w.set_irefsten(deep));
+    // The TPM time driver needs MCGIRCLK in stop. Other time drivers use clocks that remain
+    // available without keeping the selected IRC running.
+    MCG.c1()
+        .modify(|w| w.set_irefsten(deep && cfg!(feature = "time-driver-tpm")));
     if pll {
         MCG.c5().modify(|w| w.set_pllsten(deep));
+    }
+
+    if mode == SleepMode::VeryLowPowerStop {
+        PMC.regsc().modify(|w| w.0 &= !(1 << 5));
     }
 
     let (stopm, pstopo) = match mode {
