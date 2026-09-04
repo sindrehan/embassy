@@ -12,9 +12,8 @@ pub mod spi_link;
 /// Bytes 0..8: backdoor comparison key (unused).
 /// Bytes 8..12: FPROT3..FPROT0, 0xFF = no flash protection.
 /// Byte 12: FSEC = 0xFE, security disabled, mass erase enabled.
-/// Byte 13: FOPT = 0x3D. BOOTSRC_SEL selects internal flash, BOOTPIN_OPT lets
-///          BOOTCFG0 request the ROM updater, NMI is enabled, initialization is
-///          fast, and LPBOOT selects RUN after reset.
+/// Byte 13: FOPT = 0x3B. BOOTSRC_SEL selects internal flash, NMI is disabled,
+///          initialization is fast, and LPBOOT selects RUN after reset.
 /// Bytes 14..16: reserved.
 #[used]
 #[unsafe(no_mangle)]
@@ -23,7 +22,7 @@ pub static FLASH_CONFIG: [u8; 16] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // backdoor key
     0xFF, 0xFF, 0xFF, 0xFF, // FPROT3..FPROT0
     0xFE, // FSEC
-    0x3D, // FOPT
+    0x3B, // FOPT
     0xFF, 0xFF,
 ];
 

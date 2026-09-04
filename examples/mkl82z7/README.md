@@ -103,5 +103,5 @@ SPI shifts both directions at the same time.
 
 `memory.x` reserves the flash configuration field at `0x400..0x40f`. The value
 in `src/lib.rs` leaves the device unsecured, enables mass erase, boots from
-internal flash unless BOOTCFG0 requests the ROM updater, enables NMI, selects
-fast initialization, and enters RUN after reset.
+internal flash, disables NMI, selects fast initialization, and enters RUN after
+reset.
