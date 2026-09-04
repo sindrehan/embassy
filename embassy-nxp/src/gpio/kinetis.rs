@@ -330,6 +330,13 @@ impl<'d> Flex<'d> {
             .modify(|w| w.set_pdd(self.pin.pin_number() as usize, false));
     }
 
+    /// Disconnect the pin and disable its digital input buffer and pulls.
+    ///
+    /// This is the lowest-power pin configuration.
+    pub fn set_as_disconnected(&mut self) {
+        self.pin.pcr().write(|w| w.set_isf(true));
+    }
+
     /// Get the current level of the pin, as seen by the input buffer.
     pub fn level(&self) -> Level {
         if self.gpio().pdir().read().pdi(self.pin.pin_number() as usize) {
