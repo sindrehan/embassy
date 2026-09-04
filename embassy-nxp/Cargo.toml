@@ -70,7 +70,7 @@ time-driver-pit = ["_time_driver", "embassy-time?/tick-hz-1_000_000"]
 ## Use Real Time Clock (RTC) as the time driver for `embassy-time`, with a tick rate of 32768 Hz
 time-driver-rtc = ["_time_driver", "embassy-time?/tick-hz-32_768"]
 
-## Use TPM0 as the time driver for `embassy-time`, with a tick rate of 1 MHz (Kinetis)
+## Use TPM2 as the time driver for `embassy-time`, with a tick rate of 1 MHz (Kinetis)
 time-driver-tpm = ["_time_driver", "embassy-time?/tick-hz-1_000_000"]
 
 ## Reexport the PAC for the currently enabled chip at `embassy_nxp::pac` (unstable)

@@ -1,6 +1,6 @@
 //! Time driver using a Timer/PWM Module (TPM).
 //!
-//! This driver is used with the Kinetis parts. TPM0 runs as a free-running 16-bit counter at
+//! This driver is used with the Kinetis parts. TPM2 runs as a free-running 16-bit counter at
 //! 1 MHz, clocked from the 4 MHz fast internal reference clock (MCGIRCLK) through the /4
 //! prescaler, so the tick rate does not depend on the core or bus clock configuration.
 //!
@@ -20,7 +20,7 @@ use embassy_time_driver::Driver as _;
 use embassy_time_queue_utils::Queue;
 
 use crate::pac::tpm::vals::{Cmod, Dbgmode, Ps};
-use crate::pac::{MCG, SIM, TPM0, interrupt, mcg, sim};
+use crate::pac::{SIM, TPM2, interrupt};
 
 /// Alarm compare channel.
 const ALARM_CH: usize = 0;
@@ -42,7 +42,7 @@ impl embassy_time_driver::Driver for Driver {
     fn now(&self) -> u64 {
         let period = self.period.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
-        let counter = TPM0.cnt().read().count();
+        let counter = TPM2.cnt().read().count();
         calc_now(period, counter)
     }
 
@@ -63,45 +63,39 @@ impl embassy_time_driver::Driver for Driver {
 
 impl Driver {
     fn init(&'static self) {
-        // 4 MHz fast IRC on MCGIRCLK. FCRDIV resets to /2 and may only be changed while the fast
-        // IRC is not in use, so set it before enabling the clock output.
-        MCG.sc().modify(|w| w.set_fcrdiv(mcg::vals::Fcrdiv::_000));
-        MCG.c2().modify(|w| w.set_ircs(true));
-        MCG.c1().modify(|w| w.set_irclken(true));
-        while !MCG.s().read().ircst() {}
+        crate::clocks::enable_tpm_clock();
 
         critical_section::with(|_| {
-            SIM.scgc6().modify(|w| w.set_tpm0(true));
-            SIM.sopt2().modify(|w| w.set_tpmsrc(sim::vals::Tpmsrc::_11));
+            SIM.scgc6().modify(|w| w.set_tpm2(true));
         });
 
         // Configure with the counter stopped so MOD and CnV writes take effect immediately.
-        TPM0.sc().write(|w| {
+        TPM2.sc().write(|w| {
             w.set_cmod(Cmod::_00);
             w.set_tof(true);
         });
-        TPM0.mod_().write(|w| w.set_mod_(u16::MAX));
-        TPM0.cnt().write(|w| w.set_count(0));
+        TPM2.mod_().write(|w| w.set_mod_(u16::MAX));
+        TPM2.cnt().write(|w| w.set_count(0));
 
         // Half period compare: software output compare, interrupt enabled.
-        TPM0.cv(HALF_CH).write(|w| w.set_val(0x8000));
-        TPM0.csc(HALF_CH).write(|w| {
+        TPM2.cv(HALF_CH).write(|w| w.set_val(0x8000));
+        TPM2.csc(HALF_CH).write(|w| {
             w.set_msa(true);
             w.set_chie(true);
             w.set_chf(true);
         });
 
         // Alarm compare: software output compare, armed by `set_alarm`.
-        TPM0.csc(ALARM_CH).write(|w| {
+        TPM2.csc(ALARM_CH).write(|w| {
             w.set_msa(true);
             w.set_chf(true);
         });
 
-        TPM0.conf().write(|w| w.set_dbgmode(Dbgmode::_11));
+        TPM2.conf().write(|w| w.set_dbgmode(Dbgmode::_11));
 
-        unsafe { interrupt::TPM0.enable() };
+        unsafe { interrupt::TPM2.enable() };
 
-        TPM0.sc().write(|w| {
+        TPM2.sc().write(|w| {
             w.set_ps(Ps::_010);
             w.set_toie(true);
             w.set_cmod(Cmod::_01);
@@ -110,7 +104,7 @@ impl Driver {
 
     fn arm_alarm(&self, armed: bool) {
         // Writing CHF as 1 clears a stale flag from an earlier pass over the same counter value.
-        TPM0.csc(ALARM_CH).write(|w| {
+        TPM2.csc(ALARM_CH).write(|w| {
             w.set_msa(true);
             w.set_chie(armed);
             w.set_chf(true);
@@ -130,7 +124,7 @@ impl Driver {
 
         // Write the compare value regardless of whether it is armed now. `next_period` arms it
         // later if the alarm is too far away.
-        TPM0.cv(ALARM_CH).write(|w| w.set_val(timestamp as u16));
+        TPM2.cv(ALARM_CH).write(|w| w.set_val(timestamp as u16));
         let diff = timestamp - t;
         self.arm_alarm(diff < 0xc000);
 
@@ -166,7 +160,7 @@ impl Driver {
             if at < t + 0xc000 {
                 // The compare value was already written by `set_alarm`. A stale CHF may raise
                 // one early interrupt, which `trigger_alarm` handles by re-arming.
-                TPM0.csc(ALARM_CH).modify(|w| w.set_chie(true));
+                TPM2.csc(ALARM_CH).modify(|w| w.set_chie(true));
             }
         })
     }
@@ -174,8 +168,8 @@ impl Driver {
     fn on_interrupt(&self) {
         critical_section::with(|cs| {
             // Flags are write-1-to-clear: writing back what was read clears exactly those.
-            let status = TPM0.status().read();
-            TPM0.status().write_value(status);
+            let status = TPM2.status().read();
+            TPM2.status().write_value(status);
 
             if status.tof() {
                 self.next_period();
@@ -185,7 +179,7 @@ impl Driver {
                 self.next_period();
             }
 
-            if status.chf(ALARM_CH) && TPM0.csc(ALARM_CH).read().chie() {
+            if status.chf(ALARM_CH) && TPM2.csc(ALARM_CH).read().chie() {
                 self.trigger_alarm(cs);
             }
         })
@@ -204,6 +198,6 @@ pub(crate) fn init() {
 
 #[cfg(feature = "rt")]
 #[interrupt]
-fn TPM0() {
+fn TPM2() {
     DRIVER.on_interrupt();
 }

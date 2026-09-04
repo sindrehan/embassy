@@ -70,7 +70,7 @@ use core::cell::Cell;
 use critical_section::Mutex;
 
 use crate::pac::mcg::vals::{Clks, Clkst, DrstDrs, Fcrdiv, Frdiv, Range};
-use crate::pac::sim::vals::{Lpuartsrc, Outdiv1, Outdiv2, Outdiv4, Outdiv5, Pllfllsel};
+use crate::pac::sim::vals::{Flexiosrc, Lpuartsrc, Outdiv1, Outdiv2, Outdiv4, Outdiv5, Pllfllsel, Tpmsrc};
 use crate::pac::smc::vals::Runm;
 use crate::pac::{MCG, OSC, SIM, SMC};
 
@@ -418,6 +418,45 @@ pub(crate) fn lpuart_source() -> Lpuartsrc {
     } else {
         Lpuartsrc::_01
     }
+}
+
+/// Clock supplied to the TPM modules by [`enable_tpm_clock`].
+pub(crate) const TPM_CLOCK_HZ: u32 = FAST_IRC_HZ;
+
+fn enable_fast_irc() {
+    if MCG.c1().read().irclken() {
+        assert!(
+            MCG.c2().read().ircs() && MCG.sc().read().fcrdiv() == Fcrdiv::_000,
+            "MCGIRCLK is already enabled with a clock other than the 4 MHz fast IRC"
+        );
+    } else {
+        // FCRDIV may only change while the fast IRC is not in use.
+        critical_section::with(|_| {
+            MCG.sc().modify(|w| w.set_fcrdiv(Fcrdiv::_000));
+            MCG.c2().modify(|w| w.set_ircs(true));
+            MCG.c1().modify(|w| w.set_irclken(true));
+        });
+    }
+    while !MCG.s().read().ircst() {}
+}
+
+/// Route the undivided 4 MHz fast internal reference clock to all TPM modules.
+///
+/// `SIM_SOPT2[TPMSRC]` is shared by every TPM instance. Keeping one fixed source lets the time
+/// driver and application PWM instances run together without depending on the system clock mode.
+pub(crate) fn enable_tpm_clock() {
+    enable_fast_irc();
+
+    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_tpmsrc(Tpmsrc::_11)));
+}
+
+/// Clock supplied to FlexIO by [`enable_flexio_clock`].
+pub(crate) const FLEXIO_CLOCK_HZ: u32 = FAST_IRC_HZ;
+
+/// Route the undivided 4 MHz fast internal reference clock to FlexIO.
+pub(crate) fn enable_flexio_clock() {
+    enable_fast_irc();
+    critical_section::with(|_| SIM.sopt2().modify(|w| w.set_flexiosrc(Flexiosrc::_11)));
 }
 
 static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {

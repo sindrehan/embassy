@@ -21,7 +21,7 @@ pub mod lpuart;
 pub mod pint;
 #[cfg(kinetis)]
 pub mod power;
-#[cfg(lpc55)]
+#[cfg(any(lpc55, kinetis))]
 pub mod pwm;
 #[cfg(lpc55)]
 pub mod sct;

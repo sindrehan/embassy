@@ -80,8 +80,8 @@ fn singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
         // GPIO and DMA are generated in a 2nd pass.
         let skip_singleton = peripheral.name.starts_with("GPIO") || dma_instance(peripheral.name).is_some();
 
-        // The Kinetis time driver owns TPM0.
-        let skip_singleton = skip_singleton || (cfg!(feature = "time-driver-tpm") && peripheral.name == "TPM0");
+        // The Kinetis time driver owns TPM2.
+        let skip_singleton = skip_singleton || (cfg!(feature = "time-driver-tpm") && peripheral.name == "TPM2");
 
         if !skip_singleton {
             singletons.push(Singleton {
@@ -443,6 +443,51 @@ fn impl_sct(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     }
 }
 
+#[cfg(feature = "_kinetis")]
+fn impl_pwm(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+    let channels = peripheral
+        .signals
+        .iter()
+        .filter_map(|signal| signal.name.strip_prefix("CH")?.parse::<usize>().ok())
+        .max()
+        .map_or(0, |channel| channel + 1);
+
+    impls.push(quote! {
+        impl_pwm_instance!(#instance, #channels);
+    });
+
+    for signal in peripheral.signals.iter().filter(|signal| signal.name.starts_with("CH")) {
+        let channel = Literal::usize_unsuffixed(signal.name.strip_prefix("CH").unwrap().parse().unwrap());
+        for pin in signal.pins {
+            let alt = format_ident!("Mux{}", pin.alt);
+            let pin = format_ident!("{}", pin.pin);
+            impls.push(quote! {
+                impl_pwm_pin!(#pin, #instance, #channel, #alt);
+            });
+        }
+    }
+}
+
+#[cfg(feature = "_kinetis")]
+fn impl_flexio_pwm(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+    impls.push(quote! {
+        impl_flexio_pwm_instance!(#instance, 8);
+    });
+
+    for signal in peripheral.signals.iter().filter(|signal| signal.name.starts_with('D')) {
+        let number = Literal::u8_unsuffixed(signal.name.strip_prefix('D').unwrap().parse().unwrap());
+        for pin in signal.pins {
+            let alt = format_ident!("Mux{}", pin.alt);
+            let pin = format_ident!("{}", pin.pin);
+            impls.push(quote! {
+                impl_flexio_pwm_pin!(#pin, #instance, #number, #alt);
+            });
+        }
+    }
+}
+
 #[cfg(not(feature = "_kinetis"))]
 fn impl_spi(cfgs: &mut common::CfgSet, impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
     cfgs.declare_all(&["has_spi_sck_pins", "has_spi_mosi_pins", "has_spi_miso_pins"]);
@@ -721,6 +766,14 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
 
             if peripheral.name.starts_with("SPI") {
                 impl_dspi(&mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("TPM") {
+                impl_pwm(&mut impls, peripheral);
+            }
+
+            if peripheral.name.starts_with("FLEXIO") {
+                impl_flexio_pwm(&mut impls, peripheral);
             }
 
             if peripheral.name == "LLWU" {
