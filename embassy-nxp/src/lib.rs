@@ -10,6 +10,8 @@ pub mod adc;
 pub mod clocks;
 #[cfg(any(lpc55, kinetis))]
 pub mod dma;
+#[cfg(all(kinetis, feature = "executor-thread"))]
+pub mod executor;
 pub mod gpio;
 #[cfg(kinetis)]
 pub mod i2c;

@@ -5,7 +5,7 @@
 //! - **Run modes.** RUN, HSRUN (entered by [`clocks`](crate::clocks) when the core clock needs it)
 //!   and VLPR, selected through [`ClockConfig::run_mode`](crate::clocks::ClockConfig) because VLPR
 //!   restricts the clocks: BLPI on the fast IRC, 4 MHz core, and 800 kHz bus and flash clocks.
-//! - **Idle sleep.** [`Config::sleep_mode`] picks what the executor's idle `WFE` enters: WAIT,
+//! - **Idle sleep.** [`Config::sleep_mode`] picks what the executor enters when idle: WAIT,
 //!   a partial stop, STOP or VLPS. The time driver keeps ticking in all of them (its TPM clock,
 //!   the fast IRC, is kept running in stop), so `embassy-time` wakes the core as usual. Bus
 //!   peripherals only keep working while asleep in WAIT and partial stop 2. Peripherals with an
@@ -16,6 +16,8 @@
 
 use core::time::Duration;
 
+#[cfg(feature = "executor-thread")]
+use critical_section::CriticalSection;
 use embassy_hal_internal::interrupt::InterruptExt;
 
 use crate::clocks::{ClockConfig, McgMode, RUN_MAX_CORE_HZ, RunMode};
@@ -45,7 +47,10 @@ pub enum SleepMode {
     PartialStop1,
     /// Normal STOP. The fast IRC (time driver) and, in PEE, the PLL are kept running.
     Stop,
-    /// Very low power stop. Not available with a PLL clock configuration.
+    /// Very low power stop.
+    ///
+    /// PLL clock configurations require the `executor-thread` feature so the executor can
+    /// restore PEE before servicing the interrupt that woke the core.
     VeryLowPowerStop,
 }
 
@@ -155,8 +160,8 @@ fn apply_sleep_mode(mode: SleepMode, pll: bool) {
     );
     if mode == SleepMode::VeryLowPowerStop {
         assert!(
-            !pll,
-            "VLPS is not available with a PLL clock configuration: the MCG drops to PBE on exit"
+            !pll || cfg!(feature = "executor-thread"),
+            "VLPS with a PLL clock configuration requires the embassy-nxp executor-thread feature"
         );
     }
 
@@ -185,6 +190,16 @@ fn set_sleepdeep(deep: bool) {
     unsafe {
         scb.scr.modify(|v| if deep { v | (1 << 2) } else { v & !(1 << 2) });
     }
+}
+
+/// Sleep until an interrupt is pending, then restore clocks before interrupts are unmasked.
+#[cfg(feature = "executor-thread")]
+pub(crate) unsafe fn sleep(_cs: CriticalSection) {
+    cortex_m::asm::dsb();
+    cortex_m::asm::wfi();
+    cortex_m::asm::isb();
+
+    crate::clocks::restore_after_stop();
 }
 
 /// LLWU input number of a pin, from the generated table.

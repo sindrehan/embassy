@@ -13,6 +13,7 @@ build = [
     {target = "thumbv7em-none-eabihf", features = ["defmt", "mimxrt1011", "rt", "time-driver-pit"]},
     {target = "thumbv7em-none-eabihf", features = ["defmt", "mimxrt1062", "rt", "time-driver-pit"]},
     {target = "thumbv6m-none-eabi", features = ["defmt", "mkl82z7", "rt", "time-driver-tpm"]},
+    {target = "thumbv6m-none-eabi", features = ["defmt", "mkl82z7", "rt", "time-driver-tpm", "executor-thread"]},
 ]
 
 [package.metadata.embassy_docs]
@@ -34,6 +35,7 @@ critical-section = "1.1.2"
 embassy-hal-internal = { version = "0.5.0", path = "../embassy-hal-internal", features = ["cortex-m", "prio-bits-2"] }
 embassy-sync = { version = "0.8.0", path = "../embassy-sync" }
 embassy-futures = { version = "0.1.2", path = "../embassy-futures"}
+embassy-executor = { version = "0.10.0", path = "../embassy-executor", optional = true }
 defmt = { version = "1", optional = true }
 log = { version = "0.4.27", optional = true }
 embassy-time = { version = "0.5.1", path = "../embassy-time", optional = true }
@@ -63,6 +65,9 @@ rt = ["nxp-pac?/rt"]
 defmt = ["dep:defmt", "embassy-hal-internal/defmt", "embassy-sync/defmt"]
 
 log = ["dep:log"]
+
+## Enable the Kinetis thread-mode executor with low-power sleep support.
+executor-thread = ["dep:embassy-executor"]
 
 ## Use Periodic Interrupt Timer (PIT) as the time driver for `embassy-time`, with a tick rate of 1 MHz
 time-driver-pit = ["_time_driver", "embassy-time?/tick-hz-1_000_000"]

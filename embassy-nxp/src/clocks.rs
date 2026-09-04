@@ -526,6 +526,24 @@ fn current_mcgout_hz() -> u32 {
     }
 }
 
+/// Restore the configured PEE clock after a stop mode wakes in PBE.
+#[cfg(feature = "executor-thread")]
+pub(crate) fn restore_after_stop() {
+    if !clocks().pll {
+        return;
+    }
+
+    match MCG.s().read().clkst() {
+        Clkst::_11 => return,
+        Clkst::_10 => {}
+        _ => panic!("PLL clock did not wake in PBE or PEE"),
+    }
+
+    while !MCG.s().read().lock0() {}
+    MCG.c1().modify(|w| w.set_clks(Clks::_00));
+    while MCG.s().read().clkst() != Clkst::_11 {}
+}
+
 fn set_dividers(config: &ClockConfig) {
     SIM.clkdiv1().write(|w| {
         w.set_outdiv1(Outdiv1::from_bits(config.core_div - 1));
