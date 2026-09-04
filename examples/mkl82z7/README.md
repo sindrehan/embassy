@@ -31,6 +31,8 @@ the reset clock configuration.
 - `blinky`: blinks the RGB LED with the PLL clock configuration.
 - `pwm_rgb`: fades the RGB LED between colors. TPM0 drives red and green, and
   FlexIO timer 0 drives blue on PTC0/FXIO0_D12.
+- `adc`: samples PTB0, VREFL, and VREFH with calibrated 16-bit conversions and
+  32-sample hardware averaging. PTB0 is on J4 pin 12 (B6).
 - `hello`: reports the configured clocks and runs a short CPU benchmark.
 - `gpio_irq`: exercises GPIO edge and level waits; connect D11 to D12.
 - `serial`: echoes bytes on the OpenSDA virtual serial port at 115200 baud.
