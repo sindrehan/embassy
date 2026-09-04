@@ -7,13 +7,12 @@ use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_hal_internal::{PeripheralType, impl_peripheral};
 use embassy_sync::waitqueue::AtomicWaker;
 
-use crate::Peri;
 use crate::pac::common::{RW, Reg};
 #[cfg(feature = "rt")]
 use crate::pac::interrupt;
 use crate::pac::port::vals::{Irqc, Mux};
 use crate::pac::{GPIOA, GPIOB, GPIOC, GPIOD, GPIOE, Interrupt, PORTA, PORTB, PORTC, PORTD, PORTE, gpio, port};
-use crate::peripherals;
+use crate::{Peri, peripherals};
 
 const PORT_COUNT: usize = 5;
 const PINS_PER_PORT: usize = 32;
@@ -48,13 +47,13 @@ pub(crate) fn init() {
 fn on_port_interrupt(bank: Bank) {
     let port = bank.port();
     let flags = port.isfr().read().0;
-    for pin in 0..PINS_PER_PORT {
+    for (pin, waker) in WAKERS[bank as usize].iter().enumerate() {
         if flags & (1 << pin) != 0 {
             port.pcr(pin).modify(|w| {
                 w.set_irqc(Irqc::_0000);
                 w.set_isf(true);
             });
-            WAKERS[bank as usize][pin].wake();
+            waker.wake();
         }
     }
 }
@@ -155,29 +154,36 @@ impl<'d> Output<'d> {
     #[inline]
     pub fn new(pin: Peri<'d, impl Pin>, initial_output: Level) -> Self {
         let mut pin = Flex::new(pin);
-        let mut result = Self { pin: Flex { pin: unsafe { AnyPin::steal(pin.pin_bank(), pin.pin_number()) } } };
 
         // Set the level before switching to output so the pin never glitches.
         match initial_output {
-            Level::High => result.set_high(),
-            Level::Low => result.set_low(),
+            Level::High => pin.set_high(),
+            Level::Low => pin.set_low(),
         };
         pin.set_as_output();
-        result.pin = pin;
 
-        result
+        Self { pin }
     }
 
     pub fn set_high(&mut self) {
-        self.pin.gpio().psor().write(|w| w.set_ptso(self.pin.pin_number() as usize, true));
+        self.pin
+            .gpio()
+            .psor()
+            .write(|w| w.set_ptso(self.pin.pin_number() as usize, true));
     }
 
     pub fn set_low(&mut self) {
-        self.pin.gpio().pcor().write(|w| w.set_ptco(self.pin.pin_number() as usize, true));
+        self.pin
+            .gpio()
+            .pcor()
+            .write(|w| w.set_ptco(self.pin.pin_number() as usize, true));
     }
 
     pub fn toggle(&mut self) {
-        self.pin.gpio().ptor().write(|w| w.set_ptto(self.pin.pin_number() as usize, true));
+        self.pin
+            .gpio()
+            .ptor()
+            .write(|w| w.set_ptto(self.pin.pin_number() as usize, true));
     }
 
     /// Get the current output level of the pin. Note that the value returned by this function is
@@ -349,15 +355,21 @@ impl<'d> Flex<'d> {
     }
 
     pub fn set_high(&mut self) {
-        self.gpio().psor().write(|w| w.set_ptso(self.pin.pin_number() as usize, true));
+        self.gpio()
+            .psor()
+            .write(|w| w.set_ptso(self.pin.pin_number() as usize, true));
     }
 
     pub fn set_low(&mut self) {
-        self.gpio().pcor().write(|w| w.set_ptco(self.pin.pin_number() as usize, true));
+        self.gpio()
+            .pcor()
+            .write(|w| w.set_ptco(self.pin.pin_number() as usize, true));
     }
 
     pub fn toggle(&mut self) {
-        self.gpio().ptor().write(|w| w.set_ptto(self.pin.pin_number() as usize, true));
+        self.gpio()
+            .ptor()
+            .write(|w| w.set_ptto(self.pin.pin_number() as usize, true));
     }
 
     /// Wait until the pin is high. Returns immediately if it already is.

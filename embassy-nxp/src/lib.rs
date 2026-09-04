@@ -17,10 +17,10 @@ pub mod i2c;
 pub mod intmux;
 #[cfg(kinetis)]
 pub mod lpuart;
-#[cfg(kinetis)]
-pub mod power;
 #[cfg(lpc55)]
 pub mod pint;
+#[cfg(kinetis)]
+pub mod power;
 #[cfg(lpc55)]
 pub mod pwm;
 #[cfg(lpc55)]
@@ -199,27 +199,32 @@ pub fn init(_config: config::Config) -> Peripherals {
     peripherals
 }
 
-/// Disable the Kinetis watchdog, which runs out of reset with a timeout of roughly half a
-/// second (bus clock, TOVAL = 5,000,012).
-///
-/// This runs from `cortex-m-rt`'s `__pre_init` hook, before RAM is initialized, because it has
-/// to happen fast: when the debugger halts the core at the reset vector and then resumes it, the
-/// watchdog demands the first unlock word within the 256 bus cycle watchdog configuration time
-/// (KL82 reference manual, "Watchdog configuration time (WCT)"), and resets the chip otherwise.
-/// Doing it from `init` was already too late. The two unlock writes must land within 20 bus
-/// cycles of each other, and the control bits may be updated only once after unlocking, so this
-/// is the only place that touches them.
-///
-/// # Safety
-///
-/// Called once by the reset handler. Must not touch statics: `.data` and `.bss` are not set up yet.
-#[cfg(kinetis)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __pre_init() {
-    pac::WDOG.unlock().write(|w| w.set_wdogunlock(0xC520));
-    pac::WDOG.unlock().write(|w| w.set_wdogunlock(0xD928));
-    pac::WDOG.stctrlh().modify(|w| w.set_wdogen(false));
-}
+// Disable the watchdog before cortex-m-rt initializes RAM. This must be assembly: a Rust
+// function may use the uninitialized stack even when its source does not contain local variables.
+#[cfg(all(kinetis, feature = "rt"))]
+core::arch::global_asm!(
+    r#"
+    .syntax unified
+    .section .text.__pre_init, "ax"
+    .global __pre_init
+    .type __pre_init, %function
+    .thumb_func
+__pre_init:
+    ldr r0, =0x4005200e
+    ldr r1, =0xc520
+    ldr r2, =0xd928
+    strh r1, [r0]
+    strh r2, [r0]
+
+    subs r0, r0, #14
+    ldrh r1, [r0]
+    movs r2, #1
+    bics r1, r2
+    strh r1, [r0]
+    bx lr
+    .size __pre_init, . - __pre_init
+"#
+);
 
 /// HAL configuration for the NXP board.
 pub mod config {

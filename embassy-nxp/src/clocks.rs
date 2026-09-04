@@ -83,13 +83,19 @@ const FLL_FACTOR_LOW: u32 = 640;
 /// Core clock limits in Run and High Speed Run mode.
 const RUN_MAX_CORE_HZ: u32 = 72_000_000;
 const HSRUN_MAX_CORE_HZ: u32 = 96_000_000;
+/// Maximum MCG output and PLL clock.
+const MAX_MCGOUT_HZ: u32 = 144_000_000;
 /// Bus and flash clock limit.
 const MAX_BUS_HZ: u32 = 24_000_000;
+/// QuadSPI bus interface clock limits in Run and High Speed Run mode.
+const RUN_MAX_QSPI_HZ: u32 = 72_000_000;
+const HSRUN_MAX_QSPI_HZ: u32 = 96_000_000;
 /// 48 MHz internal reference, selected as the PLLFLLSEL peripheral clock.
 const IRC48M_HZ: u32 = 48_000_000;
 /// Limits in VLPR.
 const VLPR_MAX_CORE_HZ: u32 = 4_000_000;
-const VLPR_MAX_FLASH_HZ: u32 = 1_000_000;
+const VLPR_MAX_BUS_HZ: u32 = 800_000;
+const VLPR_MAX_FLASH_HZ: u32 = 800_000;
 
 /// The run mode the chip settles in after `init`. HSRUN is implied by a core clock above 72 MHz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -98,9 +104,9 @@ pub enum RunMode {
     /// Normal run (or high speed run above 72 MHz core).
     #[default]
     Run,
-    /// Very low power run: needs [`McgMode::Blpi`], core and bus at most 4 MHz, flash at most
-    /// 1 MHz. The 48 MHz IRC is off, so LPUART runs from the 4 MHz IRC. See
-    /// [`ClockConfig::vlpr`].
+    /// Very low power run: needs [`McgMode::Blpi`], a core clock of at most 4 MHz, and nominal
+    /// bus and flash clocks below 800 kHz. The 48 MHz IRC is off, so LPUART runs from the 4 MHz
+    /// IRC. See [`ClockConfig::vlpr`].
     VeryLowPower,
 }
 
@@ -152,7 +158,7 @@ pub enum McgMode {
 ///
 /// The bus, flash and QuadSPI clocks are `MCGOUTCLK` divided by their dividers. The reference
 /// manual requires the core clock to be at most 72 MHz in Run mode (96 MHz in High Speed Run
-/// mode, entered automatically), the bus and flash clocks to be at most 24 MHz and at most an
+/// mode, entered automatically), the bus and flash clocks to be at most 24 MHz and at least an
 /// eighth of the core clock, and the flash clock to be at most the bus clock. Violations panic
 /// in `init`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,13 +218,13 @@ impl ClockConfig {
         }
     }
 
-    /// Very low power run on the 4 MHz fast IRC: 4 MHz core and bus, 1 MHz flash.
+    /// Very low power run on the fast IRC: 4 MHz core and 800 kHz bus and flash clocks.
     pub const fn vlpr() -> Self {
         Self {
             mcg: McgMode::Blpi,
             core_div: 1,
-            bus_div: 1,
-            flash_div: 4,
+            bus_div: 5,
+            flash_div: 5,
             qspi_div: 1,
             run_mode: RunMode::VeryLowPower,
         }
@@ -256,22 +262,39 @@ impl ClockConfig {
             div_ok(self.core_div) && div_ok(self.bus_div) && div_ok(self.flash_div) && div_ok(self.qspi_div),
             "clock dividers must be 1 to 16"
         );
+        assert!(c.mcgout <= MAX_MCGOUT_HZ, "MCG output clock above 144 MHz");
         assert!(c.core <= HSRUN_MAX_CORE_HZ, "core clock above 96 MHz");
         assert!(c.bus <= MAX_BUS_HZ, "bus clock above 24 MHz");
-        assert!(c.flash <= MAX_BUS_HZ && c.flash <= c.bus, "flash clock above 24 MHz or above the bus clock");
         assert!(
-            self.bus_div % self.core_div == 0 && self.flash_div % self.core_div == 0,
+            c.flash <= MAX_BUS_HZ && c.flash <= c.bus,
+            "flash clock above 24 MHz or above the bus clock"
+        );
+        assert!(
+            self.bus_div.is_multiple_of(self.core_div) && self.flash_div.is_multiple_of(self.core_div),
             "bus and flash clocks must be integer divisions of the core clock"
         );
         assert!(
             self.bus_div / self.core_div <= 8 && self.flash_div / self.core_div <= 8,
             "core to bus and core to flash ratios are limited to 8"
         );
+        assert!(
+            self.qspi_div == self.core_div || self.qspi_div == self.core_div * 2,
+            "QSPI divider must equal the core divider or twice the core divider"
+        );
+        let max_qspi = if c.core > RUN_MAX_CORE_HZ {
+            HSRUN_MAX_QSPI_HZ
+        } else {
+            RUN_MAX_QSPI_HZ
+        };
+        assert!(
+            c.qspi <= max_qspi,
+            "QSPI bus interface clock exceeds the run-mode limit"
+        );
         if self.run_mode == RunMode::VeryLowPower {
             assert!(self.mcg == McgMode::Blpi, "VLPR needs the BLPI clock mode");
             assert!(
-                c.core <= VLPR_MAX_CORE_HZ && c.bus <= VLPR_MAX_CORE_HZ && c.flash <= VLPR_MAX_FLASH_HZ,
-                "VLPR allows at most 4 MHz core and bus and 1 MHz flash"
+                c.core <= VLPR_MAX_CORE_HZ && c.bus <= VLPR_MAX_BUS_HZ && c.flash <= VLPR_MAX_FLASH_HZ,
+                "BLPI VLPR allows at most 4 MHz core and 800 kHz bus and flash"
             );
         }
         if let McgMode::Pee { external, prdiv, vdiv } = self.mcg {
@@ -282,13 +305,85 @@ impl ClockConfig {
                 (8_000_000..=16_000_000).contains(&reference),
                 "PLL reference (external / prdiv) must be 8 to 16 MHz"
             );
-            if let ExternalSource::Crystal { load_capacitance_pf, .. } = external.source {
+            if let ExternalSource::Crystal {
+                load_capacitance_pf, ..
+            } = external.source
+            {
                 assert!(
                     load_capacitance_pf <= 30 && load_capacitance_pf % 2 == 0,
                     "load capacitance must be an even number of pF up to 30"
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXTERNAL_12MHZ: ExternalClock = ExternalClock {
+        frequency: 12_000_000,
+        source: ExternalSource::Clock,
+    };
+
+    #[test]
+    fn vlpr_configuration_obeys_blpi_limits() {
+        let config = ClockConfig::vlpr();
+        config.validate();
+        assert_eq!(
+            config.clocks(),
+            Clocks {
+                mcgout: 4_000_000,
+                core: 4_000_000,
+                bus: 800_000,
+                flash: 800_000,
+                qspi: 4_000_000,
+                pllfll: 0,
+                lpuart: 4_000_000,
+                pll: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pll_constructor_uses_legal_dividers() {
+        let config = ClockConfig::pll(EXTERNAL_12MHZ, 1, 24);
+        config.validate();
+        assert_eq!(config.clocks().core, 72_000_000);
+        assert_eq!(config.clocks().bus, 24_000_000);
+        assert_eq!(config.clocks().qspi, 72_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "MCG output clock above 144 MHz")]
+    fn rejects_excessive_pll_output() {
+        ClockConfig {
+            mcg: McgMode::Pee {
+                external: ExternalClock {
+                    frequency: 16_000_000,
+                    source: ExternalSource::Clock,
+                },
+                prdiv: 1,
+                vdiv: 47,
+            },
+            core_div: 4,
+            bus_div: 16,
+            flash_div: 16,
+            qspi_div: 8,
+            run_mode: RunMode::Run,
+        }
+        .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "QSPI divider")]
+    fn rejects_invalid_qspi_ratio() {
+        ClockConfig {
+            qspi_div: 3,
+            ..ClockConfig::default()
+        }
+        .validate();
     }
 }
 
@@ -318,7 +413,11 @@ pub struct Clocks {
 
 /// The `SIM_SOPT2[LPUARTSRC]` selection matching [`Clocks::lpuart`].
 pub(crate) fn lpuart_source() -> Lpuartsrc {
-    if clocks().pllfll == 0 { Lpuartsrc::_11 } else { Lpuartsrc::_01 }
+    if clocks().pllfll == 0 {
+        Lpuartsrc::_11
+    } else {
+        Lpuartsrc::_01
+    }
 }
 
 static CLOCKS: Mutex<Cell<Clocks>> = Mutex::new(Cell::new(Clocks {
@@ -368,7 +467,11 @@ pub(crate) fn init(config: ClockConfig) {
 
     // Selecting the IRC48M here also enables it. The fractional divider (CLKDIV3) is /1 at reset.
     // VLPR forbids the IRC48M, so there the mux stays on the (disabled) FLL output.
-    let pllfllsel = if clocks.pllfll == 0 { Pllfllsel::_00 } else { Pllfllsel::_11 };
+    let pllfllsel = if clocks.pllfll == 0 {
+        Pllfllsel::_00
+    } else {
+        Pllfllsel::_11
+    };
     critical_section::with(|_| SIM.sopt2().modify(|w| w.set_pllfllsel(pllfllsel)));
 
     critical_section::with(|cs| CLOCKS.borrow(cs).set(clocks));
