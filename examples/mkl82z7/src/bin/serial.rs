@@ -20,7 +20,7 @@ bind_interrupts!(struct Irqs {
     LPUART0 => InterruptHandler<peripherals::LPUART0>;
 });
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("serial: LPUART0 on PTB17 (TX) / PTB16 (RX), 115200 8N1");

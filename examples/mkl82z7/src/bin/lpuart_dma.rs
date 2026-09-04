@@ -48,7 +48,7 @@ async fn check<'d>(
     defmt::info!("{}: {} bytes ok in {} us", name, tx_buf.len(), elapsed.as_micros());
 }
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("lpuart dma");

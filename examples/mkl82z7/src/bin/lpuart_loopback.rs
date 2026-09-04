@@ -30,7 +30,7 @@ fn loopback() {
     regs.ctrl().modify(|w| w.set_re(true));
 }
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("lpuart loopback: LPUART0 at 115200");

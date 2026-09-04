@@ -9,7 +9,7 @@ use embassy_nxp::gpio::{Level, Output};
 use embassy_nxp_mkl82z7_examples::{self as _, spin_benchmark};
 use embassy_time::Timer;
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let mut config = embassy_nxp::config::Config::default();
     // 12 MHz crystal, 22 pF load: PLL at 144 MHz, core 72 MHz, bus and flash 24 MHz.

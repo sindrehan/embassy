@@ -17,7 +17,7 @@ bind_interrupts!(struct Irqs {
     SPI0 => spi::InterruptHandler<peripherals::SPI0>;
 });
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("spi loopback: SPI0 on PTC5/PTC6/PTC7 (D13/D11/D12), jumper D11-D12");

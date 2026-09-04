@@ -14,7 +14,7 @@ bind_interrupts!(struct Irqs {
     ADC0 => embassy_nxp::adc::InterruptHandler<peripherals::ADC0>;
 });
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     let mut input = p.PTB0;

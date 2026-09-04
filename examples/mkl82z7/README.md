@@ -10,6 +10,9 @@ cargo run --bin blinky
 The runner connects under reset so that firmware which enters a low-power mode
 can still be replaced.
 
+Async examples use the Kinetis executor so clock recovery completes before an
+interrupt handler runs after waking from VLPS.
+
 ## Board connections
 
 - The RGB LED is active low: red PTC1, green PTC2, blue PTC0.
@@ -47,6 +50,8 @@ the reset clock configuration.
   FRDM-KL82Z boards using SPI0 and SPI1.
 - `intmux`: routes I2C1 and LPUART2 through an INTMUX channel.
 - `sleep_modes`: exercises the idle sleep modes in RUN and VLPR.
+- `vlps_pll`: runs at 72 MHz from the PLL, idles in VLPS, and verifies that
+  each timer wake restores PEE before application code runs.
 - `low_power`: enters VLPS, LLS3, and VLLS3, waking from SW3 or an LPTMR
   timeout. VLLS wakeup resets the MCU, and the example reports the retained
   wake source after restart.

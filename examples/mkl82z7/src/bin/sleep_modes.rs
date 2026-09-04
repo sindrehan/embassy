@@ -27,7 +27,7 @@ fn log(uart: &mut Lpuart<'_, Blocking>, args: core::fmt::Arguments<'_>) {
     uart.blocking_flush().unwrap();
 }
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let mut config = embassy_nxp::config::Config::default();
     if VLPR {

@@ -18,7 +18,7 @@ bind_interrupts!(struct Irqs {
     SPI0 => spi::InterruptHandler<peripherals::SPI0>;
 });
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     let mut led = Output::new(p.PTC1, Level::High);

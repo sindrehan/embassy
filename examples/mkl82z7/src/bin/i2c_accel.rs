@@ -23,7 +23,7 @@ const REG_XYZ_DATA_CFG: u8 = 0x0E;
 const REG_CTRL_REG1: u8 = 0x2A;
 const WHO_AM_I: u8 = 0xC7;
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("i2c: FXOS8700CQ on I2C0 (PTD2 SCL, PTD3 SDA) at 100 kHz");

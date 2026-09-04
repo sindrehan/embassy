@@ -19,7 +19,7 @@ async fn flip_after(out: &mut Output<'_>, level: Level, ms: u64) {
     }
 }
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("gpio irq: PTC6 (D11) drives PTC7 (D12) through the jumper");

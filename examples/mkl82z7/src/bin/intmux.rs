@@ -22,7 +22,7 @@ bind_interrupts!(struct Irqs {
     INTMUX0_0 => i2c::InterruptHandler<peripherals::I2C1>, lpuart::InterruptHandler<peripherals::LPUART2>;
 });
 
-#[embassy_executor::main]
+#[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
     let p = embassy_nxp::init(Default::default());
     defmt::info!("intmux: I2C1 and LPUART2 on INTMUX0 channel 0");
