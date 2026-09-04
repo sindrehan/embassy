@@ -14,10 +14,12 @@
 //!   `embassy-time` does not advance while in these modes. VLLS exits through a reset; see
 //!   [`vlls_wake_reason`] and [`release_io_after_vlls`].
 
+use core::cell::Cell;
 use core::time::Duration;
 
 #[cfg(feature = "executor-thread")]
 use critical_section::CriticalSection;
+use critical_section::Mutex;
 use embassy_hal_internal::interrupt::InterruptExt;
 
 use crate::clocks::{ClockConfig, McgMode, RUN_MAX_CORE_HZ, RunMode};
@@ -33,6 +35,9 @@ use crate::pac::lptmr::vals::Pcs;
 use crate::pac::smc::vals::{Llsm, Pstopo, Runm, Stopm};
 use crate::pac::{Interrupt, LLWU, LPTMR0, MCG, PMC, RCM, SMC};
 use crate::{Peri, peripherals};
+
+static IDLE_SLEEP_MODE: Mutex<Cell<SleepMode>> = Mutex::new(Cell::new(SleepMode::Wait));
+static WAKE_GUARDS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
 /// What the core enters when the executor idles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -140,16 +145,7 @@ pub fn set_sleep_mode(mode: SleepMode) {
 
 /// The idle sleep mode currently configured.
 pub fn sleep_mode() -> SleepMode {
-    let deep = unsafe { (*cortex_m::peripheral::SCB::PTR).scr.read() } & (1 << 2) != 0;
-    if !deep {
-        return SleepMode::Wait;
-    }
-    match (SMC.pmctrl().read().stopm(), SMC.stopctrl().read().pstopo()) {
-        (Stopm::_010, _) => SleepMode::VeryLowPowerStop,
-        (_, Pstopo::_01) => SleepMode::PartialStop1,
-        (_, Pstopo::_10) => SleepMode::PartialStop2,
-        _ => SleepMode::Stop,
-    }
+    critical_section::with(|cs| IDLE_SLEEP_MODE.borrow(cs).get())
 }
 
 fn apply_sleep_mode(mode: SleepMode, pll: bool) {
@@ -181,7 +177,10 @@ fn apply_sleep_mode(mode: SleepMode, pll: bool) {
     SMC.pmctrl().modify(|w| w.set_stopm(stopm));
     // The SMC wants the write to land before a WFI/WFE.
     let _ = SMC.pmctrl().read();
-    set_sleepdeep(deep);
+    critical_section::with(|cs| {
+        IDLE_SLEEP_MODE.borrow(cs).set(mode);
+        set_sleepdeep(deep && WAKE_GUARDS.borrow(cs).get() == 0);
+    });
 }
 
 fn set_sleepdeep(deep: bool) {
@@ -189,6 +188,36 @@ fn set_sleepdeep(deep: bool) {
     let scb = unsafe { &*cortex_m::peripheral::SCB::PTR };
     unsafe {
         scb.scr.modify(|v| if deep { v | (1 << 2) } else { v & !(1 << 2) });
+    }
+}
+
+/// Prevent idle deep-sleep modes while an active-mode peripheral operation is in progress.
+#[must_use]
+pub(crate) struct WakeGuard;
+
+pub(crate) fn wake_guard() -> WakeGuard {
+    critical_section::with(|cs| {
+        let guards = WAKE_GUARDS.borrow(cs);
+        let count = guards.get();
+        guards.set(count.checked_add(1).expect("too many wake guards"));
+        if count == 0 {
+            set_sleepdeep(false);
+        }
+    });
+    WakeGuard
+}
+
+impl Drop for WakeGuard {
+    fn drop(&mut self) {
+        critical_section::with(|cs| {
+            let guards = WAKE_GUARDS.borrow(cs);
+            let count = guards.get();
+            assert!(count != 0, "wake guard count underflow");
+            guards.set(count - 1);
+            if count == 1 {
+                set_sleepdeep(IDLE_SLEEP_MODE.borrow(cs).get() != SleepMode::Wait);
+            }
+        });
     }
 }
 
@@ -374,7 +403,9 @@ pub fn stop(
     SMC.stopctrl().modify(|w| w.set_pstopo(sleep_before.1));
     SMC.pmctrl().modify(|w| w.set_stopm(sleep_before.0));
     let _ = SMC.pmctrl().read();
-    set_sleepdeep(sleep_before.0 != Stopm::_000 || sleep_before.1 != Pstopo::_00);
+    critical_section::with(|cs| {
+        set_sleepdeep(IDLE_SLEEP_MODE.borrow(cs).get() != SleepMode::Wait && WAKE_GUARDS.borrow(cs).get() == 0);
+    });
 
     reason
 }

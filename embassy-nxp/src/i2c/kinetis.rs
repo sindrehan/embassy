@@ -7,26 +7,29 @@
 //! With a DMA channel ([`I2c::new_with_dma`]) the bulk of each read or write run moves by DMA
 //! while the address, the first written byte and the last two read bytes, which steer ACK and
 //! STOP, stay with the state machine. I2C1 reaches the NVIC through [INTMUX0](crate::intmux),
-//! so its handler is bound to `INTMUX0_0`. There are no timeouts: a slave holding the bus
-//! stalls the transfer.
+//! so its handler is bound to `INTMUX0_0`.
+//!
+//! The `time` feature bounds transactions by [`Config::timeout`]. [`I2c::recover_bus`] can be
+//! called explicitly after an error; retry and automatic-recovery policy belongs to the
+//! application.
 #![macro_use]
 
-use core::future::poll_fn;
+use core::future::{Future, poll_fn};
 use core::marker::PhantomData;
 use core::task::Poll;
 
 use embassy_hal_internal::drop::OnDrop;
+use embassy_hal_internal::interrupt::InterruptExt as _;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal_1::i2c::Operation;
 
 use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
+use crate::gpio::{AnyPin, SealedPin};
 use crate::interrupt::typelevel::{Binding, Interrupt};
-use crate::pac::common::{RW, Reg};
 use crate::pac::i2c::I2c as Regs;
 use crate::pac::i2c::regs::S;
 use crate::pac::i2c::vals::{Flt, Mult};
-use crate::pac::port::regs::Pcr;
 use crate::pac::port::vals::Mux;
 use crate::{Async, Blocking, Mode};
 
@@ -54,18 +57,24 @@ pub enum Error {
     InvalidReadBufferLength,
     /// The DMA controller reported an error moving the data.
     Dma,
+    /// The transfer did not finish before the configured timeout.
+    Timeout,
+    /// SCL remained low during bus recovery.
+    SclHeldLow,
+    /// SDA remained low after bus recovery.
+    SdaHeldLow,
 }
 
 impl embedded_hal_1::i2c::Error for Error {
     fn kind(&self) -> embedded_hal_1::i2c::ErrorKind {
         use embedded_hal_1::i2c::{ErrorKind, NoAcknowledgeSource};
         match self {
-            Error::Bus => ErrorKind::Bus,
+            Error::Bus | Error::SclHeldLow | Error::SdaHeldLow => ErrorKind::Bus,
             Error::Arbitration => ErrorKind::ArbitrationLoss,
             Error::AddressNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address),
             Error::DataNack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
             Error::InvalidReadBufferLength => ErrorKind::Other,
-            Error::Dma => ErrorKind::Other,
+            Error::Dma | Error::Timeout => ErrorKind::Other,
         }
     }
 }
@@ -87,6 +96,9 @@ pub struct Config {
     pub frequency: u32,
     /// Enable the internal pull-ups on SCL and SDA.
     pub internal_pullup: bool,
+    /// Maximum duration of a transaction.
+    #[cfg(feature = "time")]
+    pub timeout: embassy_time::Duration,
 }
 
 impl Default for Config {
@@ -94,6 +106,8 @@ impl Default for Config {
         Self {
             frequency: 100_000,
             internal_pullup: true,
+            #[cfg(feature = "time")]
+            timeout: embassy_time::Duration::from_secs(1),
         }
     }
 }
@@ -101,6 +115,7 @@ impl Default for Config {
 /// Per-instance constants.
 pub struct Info {
     pub(crate) regs: Regs,
+    pub(crate) disable_clock: fn(),
 }
 
 /// Per-instance waker.
@@ -127,8 +142,20 @@ pub struct I2c<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
     is_async: bool,
+    irq: Option<Irq>,
     dma: Option<(Peri<'d, AnyChannel>, u8)>,
-    _phantom: PhantomData<(&'d (), M)>,
+    scl: Peri<'d, AnyPin>,
+    sda: Peri<'d, AnyPin>,
+    scl_mux: Mux,
+    sda_mux: Mux,
+    config: Config,
+    _phantom: PhantomData<M>,
+}
+
+#[derive(Clone, Copy)]
+struct Irq {
+    interrupt: crate::pac::Interrupt,
+    intmux_source: Option<u8>,
 }
 
 /// `F[MULT]` and `F[ICR]` giving the SCL frequency closest to `frequency` from `bus_hz`.
@@ -146,10 +173,57 @@ fn baud_divisors(bus_hz: u32, frequency: u32) -> (Mult, u8) {
     (Mult::from_bits(best.1), best.2)
 }
 
-fn init<T: Instance>(scl: (Reg<Pcr, RW>, Mux), sda: (Reg<Pcr, RW>, Mux), config: &Config) {
-    let regs = T::info().regs;
-    T::enable_clock();
+#[derive(Clone, Copy)]
+struct Timeout {
+    #[cfg(feature = "time")]
+    deadline: embassy_time::Instant,
+}
 
+impl Timeout {
+    async fn with_async<R>(self, future: impl Future<Output = Result<R, Error>>) -> Result<R, Error> {
+        #[cfg(feature = "time")]
+        {
+            match embassy_futures::select::select(embassy_time::Timer::at(self.deadline), future).await {
+                embassy_futures::select::Either::First(_) => Err(Error::Timeout),
+                embassy_futures::select::Either::Second(result) => result,
+            }
+        }
+
+        #[cfg(not(feature = "time"))]
+        future.await
+    }
+
+    async fn with_blocking<R>(self, future: impl Future<Output = Result<R, Error>>) -> Result<R, Error> {
+        #[cfg(feature = "time")]
+        {
+            let mut future = core::pin::pin!(future);
+            poll_fn(|cx| {
+                if embassy_time::Instant::now() >= self.deadline {
+                    Poll::Ready(Err(Error::Timeout))
+                } else {
+                    future.as_mut().poll(cx)
+                }
+            })
+            .await
+        }
+
+        #[cfg(not(feature = "time"))]
+        future.await
+    }
+}
+
+fn abort_transfer(regs: Regs) {
+    regs.c1().modify(|w| {
+        w.set_iicie(false);
+        w.set_dmaen(false);
+        w.set_mst(false);
+        w.set_tx(false);
+        w.set_txak(false);
+    });
+    regs.s().write_value(S(0).with_iicif().with_arbl());
+}
+
+fn configure_controller(regs: Regs, scl: (&AnyPin, Mux), sda: (&AnyPin, Mux), config: &Config) {
     // The reset state, with the start/stop detect flags cleared, then the divider.
     regs.a1().write(|_| {});
     regs.f().write(|_| {});
@@ -169,8 +243,8 @@ fn init<T: Instance>(scl: (Reg<Pcr, RW>, Mux), sda: (Reg<Pcr, RW>, Mux), config:
         w.set_icr(icr);
     });
 
-    for (pcr, mux) in [scl, sda] {
-        pcr.modify(|w| {
+    for (pin, mux) in [scl, sda] {
+        pin.pcr().modify(|w| {
             w.set_mux(mux);
             w.set_ode(true);
             w.set_pe(config.internal_pullup);
@@ -181,6 +255,11 @@ fn init<T: Instance>(scl: (Reg<Pcr, RW>, Mux), sda: (Reg<Pcr, RW>, Mux), config:
     regs.c1().write(|w| w.set_iicen(true));
 }
 
+fn init<T: Instance>(scl: (&AnyPin, Mux), sda: (&AnyPin, Mux), config: &Config) {
+    T::enable_clock();
+    configure_controller(T::info().regs, scl, sda, config);
+}
+
 impl<'d> I2c<'d, Blocking> {
     /// Create a blocking I2C master.
     pub fn new_blocking<T: Instance>(
@@ -189,12 +268,22 @@ impl<'d> I2c<'d, Blocking> {
         sda: Peri<'d, impl SdaPin<T>>,
         config: Config,
     ) -> Self {
-        init::<T>((scl.pcr(), scl.alt()), (sda.pcr(), sda.alt()), &config);
+        let scl_mux = scl.alt();
+        let sda_mux = sda.alt();
+        let scl = scl.into();
+        let sda = sda.into();
+        init::<T>((&scl, scl_mux), (&sda, sda_mux), &config);
         Self {
             info: T::info(),
             state: T::state(),
             is_async: false,
+            irq: None,
             dma: None,
+            scl,
+            sda,
+            scl_mux,
+            sda_mux,
+            config,
             _phantom: PhantomData,
         }
     }
@@ -209,7 +298,11 @@ impl<'d> I2c<'d, Async> {
         _irq: impl Binding<T::Interrupt, InterruptHandler<T>>,
         config: Config,
     ) -> Self {
-        init::<T>((scl.pcr(), scl.alt()), (sda.pcr(), sda.alt()), &config);
+        let scl_mux = scl.alt();
+        let sda_mux = sda.alt();
+        let scl = scl.into();
+        let sda = sda.into();
+        init::<T>((&scl, scl_mux), (&sda, sda_mux), &config);
         if let Some(source) = T::INTMUX_SOURCE {
             crate::intmux::enable_source(crate::intmux::CHANNEL, source);
         }
@@ -219,7 +312,16 @@ impl<'d> I2c<'d, Async> {
             info: T::info(),
             state: T::state(),
             is_async: true,
+            irq: Some(Irq {
+                interrupt: T::Interrupt::IRQ,
+                intmux_source: T::INTMUX_SOURCE,
+            }),
             dma: None,
+            scl,
+            sda,
+            scl_mux,
+            sda_mux,
+            config,
             _phantom: PhantomData,
         }
     }
@@ -240,47 +342,54 @@ impl<'d> I2c<'d, Async> {
 
     /// Read into `buffer` from the device at `address`.
     pub async fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Error> {
-        self.transaction_inner(address, &mut [Operation::Read(buffer)]).await
+        self.transaction_inner_async(address, &mut [Operation::Read(buffer)]).await
     }
 
     /// Write `bytes` to the device at `address`.
     pub async fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Error> {
-        self.transaction_inner(address, &mut [Operation::Write(bytes)]).await
+        self.transaction_inner_async(address, &mut [Operation::Write(bytes)]).await
     }
 
     /// Write `bytes`, then read into `buffer` after a repeated start.
     pub async fn write_read(&mut self, address: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
-        self.transaction_inner(address, &mut [Operation::Write(bytes), Operation::Read(buffer)])
+        self.transaction_inner_async(address, &mut [Operation::Write(bytes), Operation::Read(buffer)])
             .await
     }
 
     /// Run a sequence of operations as one transaction, see [`embedded_hal_1::i2c::I2c::transaction`].
     pub async fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
-        self.transaction_inner(address, operations).await
+        self.transaction_inner_async(address, operations).await
     }
 }
 
 impl<'d, M: Mode> I2c<'d, M> {
+    fn timeout(&self) -> Timeout {
+        Timeout {
+            #[cfg(feature = "time")]
+            deadline: embassy_time::Instant::now() + self.config.timeout,
+        }
+    }
+
     /// Read into `buffer` from the device at `address`.
     pub fn blocking_read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Error> {
-        embassy_futures::block_on(self.transaction_inner(address, &mut [Operation::Read(buffer)]))
+        embassy_futures::block_on(self.transaction_inner_blocking(address, &mut [Operation::Read(buffer)]))
     }
 
     /// Write `bytes` to the device at `address`.
     pub fn blocking_write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Error> {
-        embassy_futures::block_on(self.transaction_inner(address, &mut [Operation::Write(bytes)]))
+        embassy_futures::block_on(self.transaction_inner_blocking(address, &mut [Operation::Write(bytes)]))
     }
 
     /// Write `bytes`, then read into `buffer` after a repeated start.
     pub fn blocking_write_read(&mut self, address: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
         embassy_futures::block_on(
-            self.transaction_inner(address, &mut [Operation::Write(bytes), Operation::Read(buffer)]),
+            self.transaction_inner_blocking(address, &mut [Operation::Write(bytes), Operation::Read(buffer)]),
         )
     }
 
     /// Run a sequence of operations as one transaction, see [`embedded_hal_1::i2c::I2c::transaction`].
     pub fn blocking_transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
-        embassy_futures::block_on(self.transaction_inner(address, operations))
+        embassy_futures::block_on(self.transaction_inner_blocking(address, operations))
     }
 
     /// Wait for `IICIF`, returning the status. Async mode sleeps on the interrupt, blocking mode
@@ -371,7 +480,15 @@ impl<'d, M: Mode> I2c<'d, M> {
             });
         }
 
-        while !regs.s2().read().empty() {}
+        poll_fn(|cx| {
+            if regs.s2().read().empty() {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
         regs.d().write(|w| w.set_data((address << 1) | read as u8));
         self.finish_byte(Error::AddressNack).await
     }
@@ -384,21 +501,38 @@ impl<'d, M: Mode> I2c<'d, M> {
             w.set_tx(false);
             w.set_txak(false);
         });
-        while regs.s().read().busy() {}
+        poll_fn(|cx| {
+            if !regs.s().read().busy() {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
     }
 
-    async fn transaction_inner(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
+    async fn transaction_inner_async(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
+        let timeout = self.timeout();
+        let _wake_guard = crate::power::wake_guard();
+        timeout.with_async(self.transaction_inner_impl(address, operations)).await
+    }
+
+    async fn transaction_inner_blocking(
+        &mut self,
+        address: u8,
+        operations: &mut [Operation<'_>],
+    ) -> Result<(), Error> {
+        let timeout = self.timeout();
+        let _wake_guard = crate::power::wake_guard();
+        timeout
+            .with_blocking(self.transaction_inner_impl(address, operations))
+            .await
+    }
+
+    async fn transaction_inner_impl(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
         let regs = self.info.regs;
-        let on_drop = OnDrop::new(move || {
-            regs.c1().modify(|w| {
-                w.set_iicie(false);
-                w.set_dmaen(false);
-                w.set_mst(false);
-                w.set_tx(false);
-                w.set_txak(false);
-            });
-            regs.s().write_value(S(0).with_iicif().with_arbl());
-        });
+        let on_drop = OnDrop::new(move || abort_transfer(regs));
         let count = operations.len();
         let mut index = 0;
         let mut started = false;
@@ -547,6 +681,120 @@ impl<'d, M: Mode> I2c<'d, M> {
         on_drop.defuse();
         Ok(())
     }
+
+    /// Reset the controller and release a target holding SDA low by clocking up to nine bits.
+    ///
+    /// Recovery temporarily routes SCL and SDA to open-drain GPIO, attempts a STOP condition if
+    /// SDA is low, then restores the I2C pin mux and controller configuration.
+    pub fn recover_bus(&mut self) -> Result<(), Error> {
+        let regs = self.info.regs;
+        abort_transfer(regs);
+        regs.c1().modify(|w| w.set_iicen(false));
+
+        prepare_recovery_pin(&self.scl, self.config.internal_pullup);
+        prepare_recovery_pin(&self.sda, self.config.internal_pullup);
+        release_pin(&self.scl);
+        release_pin(&self.sda);
+        recovery_delay();
+
+        let mut result = wait_recovery_high(&self.scl).then_some(()).ok_or(Error::SclHeldLow);
+        if result.is_ok() && !pin_is_high(&self.sda) {
+            for _ in 0..9 {
+                drive_pin_low(&self.scl);
+                recovery_delay();
+                release_pin(&self.scl);
+                if !wait_recovery_high(&self.scl) {
+                    result = Err(Error::SclHeldLow);
+                    break;
+                }
+                recovery_delay();
+                if pin_is_high(&self.sda) {
+                    break;
+                }
+            }
+
+            if result.is_ok() {
+                drive_pin_low(&self.sda);
+                recovery_delay();
+                release_pin(&self.sda);
+                if !wait_recovery_high(&self.sda) {
+                    result = Err(Error::SdaHeldLow);
+                }
+            }
+        }
+
+        configure_controller(regs, (&self.scl, self.scl_mux), (&self.sda, self.sda_mux), &self.config);
+        result
+    }
+}
+
+fn prepare_recovery_pin(pin: &AnyPin, pullup: bool) {
+    let gpio = pin.pin_bank().gpio();
+    gpio.pcor().write(|w| w.set_ptco(pin.pin_number() as usize, true));
+    gpio.pddr().modify(|w| w.set_pdd(pin.pin_number() as usize, false));
+    pin.pcr().modify(|w| {
+        w.set_mux(Mux::Mux1);
+        w.set_ode(true);
+        w.set_pe(pullup);
+        w.set_ps(true);
+    });
+}
+
+fn drive_pin_low(pin: &AnyPin) {
+    let gpio = pin.pin_bank().gpio();
+    gpio.pcor().write(|w| w.set_ptco(pin.pin_number() as usize, true));
+    gpio.pddr().modify(|w| w.set_pdd(pin.pin_number() as usize, true));
+}
+
+fn release_pin(pin: &AnyPin) {
+    pin.pin_bank()
+        .gpio()
+        .pddr()
+        .modify(|w| w.set_pdd(pin.pin_number() as usize, false));
+}
+
+fn pin_is_high(pin: &AnyPin) -> bool {
+    pin.pin_bank().gpio().pdir().read().pdi(pin.pin_number() as usize)
+}
+
+fn recovery_delay() {
+    cortex_m::asm::delay((crate::clocks::clocks().core / 200_000).max(1));
+}
+
+fn wait_recovery_high(pin: &AnyPin) -> bool {
+    for _ in 0..200 {
+        if pin_is_high(pin) {
+            return true;
+        }
+        recovery_delay();
+    }
+    false
+}
+
+impl<'d, M: Mode> Drop for I2c<'d, M> {
+    fn drop(&mut self) {
+        abort_transfer(self.info.regs);
+        self.info.regs.c1().modify(|w| w.set_iicen(false));
+
+        if let Some(irq) = self.irq {
+            if let Some(source) = irq.intmux_source {
+                crate::intmux::disable_source(crate::intmux::CHANNEL, source);
+            } else {
+                irq.interrupt.disable();
+                irq.interrupt.unpend();
+            }
+        }
+
+        for pin in [&self.scl, &self.sda] {
+            release_pin(pin);
+            pin.pcr().modify(|w| {
+                w.set_mux(Mux::Mux0);
+                w.set_ode(false);
+                w.set_pe(false);
+            });
+        }
+        (self.info.disable_clock)();
+    }
 }
 
 /// Interrupt handler. Bind it with [`bind_interrupts!`](crate::bind_interrupts).
@@ -582,7 +830,7 @@ impl<'d, M: Mode> embedded_hal_1::i2c::I2c for I2c<'d, M> {
 
 impl<'d> embedded_hal_async::i2c::I2c for I2c<'d, Async> {
     async fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Self::Error> {
-        self.transaction_inner(address, operations).await
+        self.transaction_inner_async(address, operations).await
     }
 }
 
@@ -632,6 +880,7 @@ macro_rules! impl_i2c_instance {
             fn info() -> &'static crate::i2c::Info {
                 static INFO: crate::i2c::Info = crate::i2c::Info {
                     regs: crate::pac::$inst,
+                    disable_clock: crate::clocks::disable::<crate::peripherals::$inst>,
                 };
                 &INFO
             }

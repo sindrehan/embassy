@@ -13,7 +13,7 @@ build = [
     {target = "thumbv7em-none-eabihf", features = ["defmt", "mimxrt1011", "rt", "time-driver-pit"]},
     {target = "thumbv7em-none-eabihf", features = ["defmt", "mimxrt1062", "rt", "time-driver-pit"]},
     {target = "thumbv6m-none-eabi", features = ["defmt", "mkl82z7", "rt", "time-driver-tpm"]},
-    {target = "thumbv6m-none-eabi", features = ["defmt", "mkl82z7", "rt", "time-driver-tpm", "executor-thread"]},
+    {target = "thumbv6m-none-eabi", features = ["defmt", "mkl82z7", "rt", "time", "time-driver-tpm", "executor-thread"]},
 ]
 
 [package.metadata.embassy_docs]
@@ -62,9 +62,12 @@ default = ["rt"]
 rt = ["nxp-pac?/rt"]
 
 ## Enable [defmt support](https://docs.rs/defmt) and enables `defmt` debug-log messages and formatting in embassy drivers.
-defmt = ["dep:defmt", "embassy-hal-internal/defmt", "embassy-sync/defmt"]
+defmt = ["dep:defmt", "embassy-hal-internal/defmt", "embassy-sync/defmt", "embassy-time?/defmt"]
 
 log = ["dep:log"]
+
+## Enable timeouts in drivers that support them.
+time = ["dep:embassy-time"]
 
 ## Enable the Kinetis thread-mode executor with low-power sleep support.
 executor-thread = ["dep:embassy-executor"]

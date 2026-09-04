@@ -40,3 +40,10 @@ pub(crate) fn enable_source(channel: usize, source: u8) {
         INTMUX0.ch_ier_31_0(channel).modify(|w| w.0 |= 1 << source);
     });
 }
+
+/// Stop routing `source` to `channel` without disturbing the other sources on the channel.
+pub(crate) fn disable_source(channel: usize, source: u8) {
+    critical_section::with(|_| {
+        INTMUX0.ch_ier_31_0(channel).modify(|w| w.0 &= !(1 << source));
+    });
+}
