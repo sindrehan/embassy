@@ -393,6 +393,36 @@ impl<'d> Flex<'d> {
         InputFuture::new(self, Irqc::_1001).await
     }
 
+    /// Arm a rising-edge interrupt immediately and return its future.
+    pub(crate) fn rising_edge_future(&mut self) -> InputFuture<'_> {
+        InputFuture::new(self, Irqc::_1001)
+    }
+
+    /// Arm a rising-edge status flag without enabling its interrupt.
+    pub(crate) fn arm_rising_edge_flag(&mut self) {
+        critical_section::with(|_| {
+            self.pin.pcr().modify(|w| {
+                w.set_isf(true);
+                w.set_irqc(Irqc::_0101);
+            });
+        });
+    }
+
+    /// Whether the armed edge flag has fired.
+    pub(crate) fn rising_edge_flag(&self) -> bool {
+        self.pin.pcr().read().isf()
+    }
+
+    /// Disable the pin event and clear its status flag.
+    pub(crate) fn disarm_edge(&mut self) {
+        critical_section::with(|_| {
+            self.pin.pcr().modify(|w| {
+                w.set_irqc(Irqc::_0000);
+                w.set_isf(true);
+            });
+        });
+    }
+
     /// Wait for a high to low transition.
     pub async fn wait_for_falling_edge(&mut self) {
         InputFuture::new(self, Irqc::_1010).await
@@ -407,7 +437,7 @@ impl<'d> Flex<'d> {
 /// Completes when the pin interrupt configured with `irqc` has fired. The port handler switches
 /// the pin's interrupt off when it fires, which is what the future looks for.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-struct InputFuture<'a> {
+pub(crate) struct InputFuture<'a> {
     bank: Bank,
     pin: u8,
     _lifetime: core::marker::PhantomData<&'a mut ()>,
@@ -603,7 +633,7 @@ pub(crate) trait SealedPin: Sized {
 
 /// Interface for a Pin that can be configured by an [Input] or [Output] driver, or converted to an
 /// [AnyPin]. By default, this trait is sealed and cannot be implemented outside of the
-/// `embassy-nxp` crate due to the [SealedPin] trait.
+/// `embassy-nxp` crate due to the private `SealedPin` trait.
 #[allow(private_bounds)]
 pub trait Pin: PeripheralType + Into<AnyPin> + SealedPin + Sized + 'static {
     /// Returns the pin number within a bank

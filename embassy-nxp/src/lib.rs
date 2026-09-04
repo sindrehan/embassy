@@ -27,6 +27,8 @@ pub mod pwm;
 pub mod sct;
 #[cfg(any(lpc55, kinetis))]
 pub mod spi;
+#[cfg(kinetis)]
+pub mod spis;
 #[cfg(lpc55)]
 pub mod usart;
 
@@ -56,8 +58,8 @@ pub(crate) use nxp_pac as pac;
 /// Macro to bind interrupts to handlers.
 /// (Copied from `embassy-rp`)
 /// This defines the right interrupt handlers, and creates a unit struct (like `struct Irqs;`)
-/// and implements the right [`Binding`]s for it. You can pass this struct to drivers to
-/// prove at compile-time that the right interrupts have been bound.
+/// and implements the right [`Binding`](crate::interrupt::typelevel::Binding)s for it. You can
+/// pass this struct to drivers to prove at compile-time that the right interrupts have been bound.
 ///
 /// Example of how to bind one interrupt:
 ///

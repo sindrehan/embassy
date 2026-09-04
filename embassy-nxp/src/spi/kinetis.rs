@@ -1,12 +1,10 @@
-//! SPI master driver for the Kinetis DSPI module.
+//! SPI driver for the Kinetis DSPI module.
 //!
-//! Master mode, 8-bit frames, clocked from the bus clock. Chip select is not driven by the
-//! module; use a GPIO, for example through `embassy_embedded_hal`'s `SpiDevice`. SPI0 has a
-//! 4-entry FIFO, SPI1 a single entry. The blocking and async APIs share one transfer routine:
-//! the async driver sleeps on the "receive FIFO not empty" interrupt, the blocking driver
-//! busy-polls the same future with [`embassy_futures::block_on`]. With two DMA channels
-//! ([`Spi::new_with_dma`]) the FIFOs are fed and drained by DMA instead. SPI1 reaches the NVIC
-//! through [INTMUX0](crate::intmux), so its handler is bound to `INTMUX0_0`.
+//! The driver uses 8-bit frames clocked from the bus clock. Chip select is not driven by the
+//! module; use a GPIO, for example through `embassy_embedded_hal`'s `SpiDevice`. SPI0 has a 4-entry
+//! FIFO and SPI1 a single entry. With two DMA channels ([`Spi::new_with_dma`]) the FIFOs can be fed
+//! and drained by DMA. SPI1 reaches the NVIC through [INTMUX0](crate::intmux), so its handler is
+//! bound to `INTMUX0_0`.
 #![macro_use]
 
 use core::future::poll_fn;

@@ -654,28 +654,33 @@ fn impl_dspi(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
 
     impls.push(quote! {
         impl_spi_instance!(#instance, #depth, #rx_request, #tx_request);
+        impl_spis_instance!(#instance, #depth);
     });
 
     if let Some(args) = interrupt_args(peripheral) {
         impls.push(quote! {
             impl_spi_interrupt!(#args);
+            impl_spis_interrupt!(#args);
         });
     }
 
     for signal in peripheral.signals {
-        let r#macro = match signal.name {
-            "SCK" => format_ident!("impl_spi_sck_pin"),
-            "SOUT" => format_ident!("impl_spi_mosi_pin"),
-            "SIN" => format_ident!("impl_spi_miso_pin"),
+        let macros = match signal.name {
+            "PCS0" => vec![format_ident!("impl_spis_pcs_pin")],
+            "SCK" => vec![format_ident!("impl_spi_sck_pin"), format_ident!("impl_spis_sck_pin")],
+            "SOUT" => vec![format_ident!("impl_spi_mosi_pin"), format_ident!("impl_spis_sout_pin")],
+            "SIN" => vec![format_ident!("impl_spi_miso_pin"), format_ident!("impl_spis_sin_pin")],
             _ => continue,
         };
 
         for pin in signal.pins {
             let alt = Literal::u8_unsuffixed(pin.alt);
             let pin = format_ident!("{}", pin.pin);
-            impls.push(quote! {
-                #r#macro!(#pin, #instance, #alt);
-            });
+            for r#macro in &macros {
+                impls.push(quote! {
+                    #r#macro!(#pin, #instance, #alt);
+                });
+            }
         }
     }
 }
