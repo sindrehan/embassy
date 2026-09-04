@@ -4,6 +4,16 @@
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
+#[cfg(any(
+    all(feature = "time-driver-pit", feature = "time-driver-rtc"),
+    all(feature = "time-driver-pit", feature = "time-driver-tpm"),
+    all(feature = "time-driver-pit", feature = "time-driver-lptmr"),
+    all(feature = "time-driver-rtc", feature = "time-driver-tpm"),
+    all(feature = "time-driver-rtc", feature = "time-driver-lptmr"),
+    all(feature = "time-driver-tpm", feature = "time-driver-lptmr"),
+))]
+compile_error!("embassy-nxp time-driver features are mutually exclusive");
+
 #[cfg(any(lpc55, kinetis))]
 pub mod adc;
 #[cfg(kinetis)]
@@ -41,6 +51,7 @@ mod iomuxc;
 #[cfg_attr(feature = "time-driver-pit", path = "time_driver/pit.rs")]
 #[cfg_attr(feature = "time-driver-rtc", path = "time_driver/rtc.rs")]
 #[cfg_attr(feature = "time-driver-tpm", path = "time_driver/tpm.rs")]
+#[cfg_attr(feature = "time-driver-lptmr", path = "time_driver/lptmr.rs")]
 mod time_driver;
 
 // This mod MUST go last, so that it sees all the `impl_foo!` macros
