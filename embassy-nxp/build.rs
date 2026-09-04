@@ -132,6 +132,17 @@ fn singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
         }
     }
 
+    // Kinetis parts also expose dedicated analog pins which are not part of a GPIO bank.
+    #[cfg(feature = "_kinetis")]
+    for pin in METADATA.pins {
+        if !singletons.iter().any(|singleton| singleton.name == pin.name) {
+            singletons.push(Singleton {
+                name: pin.name.into(),
+                cfg: None,
+            });
+        }
+    }
+
     for (peripheral, instance) in METADATA
         .peripherals
         .iter()
@@ -307,6 +318,50 @@ fn impl_adc(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
         impls.push(quote! {
             impl_adc_pin!(#pin, #ch_num, crate::adc::ChannelSide::#ch_side);
         })
+    }
+}
+
+#[cfg(feature = "_kinetis")]
+fn impl_adc16(impls: &mut Vec<TokenStream>, peripheral: &Peripheral) {
+    let instance = Ident::new(peripheral.name, Span::call_site());
+    impls.push(quote! {
+        impl_adc_instance!(#instance);
+    });
+
+    if let Some(args) = interrupt_args(peripheral) {
+        impls.push(quote! {
+            impl_adc_interrupt!(#args);
+        });
+    }
+
+    for signal in peripheral.signals {
+        let (channel, mux_b) = match signal.name {
+            "DP0" => (0, false),
+            "DP1" => (1, false),
+            "DM0" => (17, false),
+            "DM1" => (18, false),
+            name if name.starts_with("SE") => {
+                let suffix = name.strip_prefix("SE").unwrap();
+                let mux_b = suffix.ends_with('B');
+                let number = suffix.trim_end_matches('B').parse::<u8>().unwrap();
+                (number, mux_b)
+            }
+            _ => continue,
+        };
+        let channel = Literal::u8_unsuffixed(channel);
+
+        for pin in signal.pins {
+            let pin = format_ident!("{}", pin.pin);
+            if pin.to_string().starts_with("PT") {
+                impls.push(quote! {
+                    impl_adc_gpio_pin!(#pin, #instance, #channel, #mux_b);
+                });
+            } else {
+                impls.push(quote! {
+                    impl_adc_fixed_pin!(#pin, #instance, #channel, #mux_b);
+                });
+            }
+        }
     }
 }
 
@@ -781,13 +836,16 @@ fn impl_peripherals(cfgs: &mut common::CfgSet, singletons: &[Singleton]) -> Toke
                 impl_flexio_pwm(&mut impls, peripheral);
             }
 
+            if peripheral.name.starts_with("ADC") {
+                impl_adc16(&mut impls, peripheral);
+            }
+
             if peripheral.name == "LLWU" {
                 impls.push(llwu_pins(peripheral));
             }
         }
 
-        // The LPC55 drivers. Kinetis peripherals of the same name (ADC0, SPI0, ...) have
-        // different signal names and no FLEXCOMM, and no drivers yet.
+        // LPC55 peripherals use a different signal naming and FLEXCOMM model.
         #[cfg(not(feature = "_kinetis"))]
         {
             let _ = is_singleton;

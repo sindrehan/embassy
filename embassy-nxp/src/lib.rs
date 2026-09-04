@@ -4,7 +4,7 @@
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
-#[cfg(lpc55)]
+#[cfg(any(lpc55, kinetis))]
 pub mod adc;
 #[cfg(kinetis)]
 pub mod clocks;
