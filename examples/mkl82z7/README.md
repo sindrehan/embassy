@@ -20,7 +20,7 @@ can still be replaced.
 - The FXOS8700CQ accelerometer is connected to I2C0 on PTD2 (SCL) and PTD3
   (SDA), at address `0x1c`.
 - SPI0 is available on PTC5 (SCK, D13), PTC6 (SOUT, D11), and PTC7 (SIN,
-  D12). Connect D11 to D12 for the loopback example.
+  D12). PTC4 (D10) is SPI0_PCS0.
 
 The board uses a 12 MHz crystal. Examples which call `ClockConfig::pll()` run
 the core at 72 MHz and the bus and flash clocks at 24 MHz. Other examples use
@@ -41,6 +41,8 @@ the reset clock configuration.
   and DMA-backed I2C transfers.
 - `spi_loopback`: tests blocking, interrupt-driven, and DMA-backed SPI
   transfers; connect D11 to D12.
+- `spi_link_master` and `spi_link_slave`: exchange checked frames between two
+  FRDM-KL82Z boards using SPI0 and SPI1.
 - `intmux`: routes I2C1 and LPUART2 through an INTMUX channel.
 - `sleep_modes`: exercises the idle sleep modes in RUN and VLPR.
 - `low_power`: enters VLPS, LLS3, and VLLS3, waking from SW3 or an LPTMR
@@ -50,6 +52,35 @@ the reset clock configuration.
 The LPUART clock must remain active for asynchronous serial reception in STOP
 or VLPS. The supplied configurations use the fast internal reference clock
 when appropriate.
+
+## Two-board SPI link
+
+Remove the D11-to-D12 loopback jumper, if fitted, then connect the boards as
+follows. Signal names are from the KL82 peripheral's point of view, so the
+master and slave data pins cross.
+
+| Master board | Slave board |
+| --- | --- |
+| GND | GND |
+| D13 / PTC5 / SPI0_SCK | J22 pin 5 / PTD5 / SPI1_SCK |
+| D11 / PTC6 / SPI0_SOUT | J22 pin 7 / PTD7 / SPI1_SIN |
+| D12 / PTC7 / SPI0_SIN | J22 pin 6 / PTD6 / SPI1_SOUT |
+| D10 / PTC4 / GPIO select | J22 pin 4 / PTD4 / SPI1_PCS0 |
+
+Run `spi_link_slave` before `spi_link_master`, using a separate terminal for
+each board:
+
+```sh
+cargo run --release --bin spi_link_slave
+cargo run --release --bin spi_link_master
+```
+
+When both probes are connected, select each one by including its serial number
+in `PROBE_RS_PROBE`, using the form `1366:1015:<serial>`.
+
+The red LED toggles for every valid frame. RTT logs on the master report each
+verified reply; replies are returned one exchange after their requests because
+SPI shifts both directions at the same time.
 
 ## Flash configuration
 

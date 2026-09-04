@@ -4,6 +4,8 @@
 use defmt_rtt as _;
 use panic_probe as _;
 
+pub mod spi_link;
+
 /// Kinetis flash configuration field, placed at 0x400 by `memory.x`, which also
 /// forces this object into the link with `EXTERN(FLASH_CONFIG)`.
 ///
