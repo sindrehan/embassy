@@ -6,13 +6,12 @@
 //!   and VLPR, selected through [`ClockConfig::run_mode`](crate::clocks::ClockConfig) because VLPR
 //!   restricts the clocks: BLPI on the fast IRC, 4 MHz core, and 800 kHz bus and flash clocks.
 //! - **Idle sleep.** [`Config::sleep_mode`] picks what the executor enters when idle: WAIT,
-//!   a partial stop, STOP or VLPS. The time driver keeps ticking in all of them (its TPM clock,
-//!   the fast IRC, is kept running in stop), so `embassy-time` wakes the core as usual. Bus
-//!   peripherals only keep working while asleep in WAIT and partial stop 2. Peripherals with an
-//!   asynchronous clock, including LPUART and TPM, can remain active in STOP and VLPS.
+//!   a partial stop, STOP or VLPS. The TPM and LPTMR time drivers keep ticking in all of them, so
+//!   `embassy-time` wakes the core as usual. Bus peripherals only keep working while asleep in
+//!   WAIT and partial stop 2. Peripherals with an asynchronous clock can remain active in STOP
+//!   and VLPS.
 //! - **Low leakage.** [`stop`] enters LLS or VLLS with LLWU pin and LPTMR timeout wake sources.
-//!   `embassy-time` does not advance while in these modes. VLLS exits through a reset; see
-//!   [`vlls_wake_reason`] and [`release_io_after_vlls`].
+//!   VLLS exits through a reset; see [`vlls_wake_reason`] and [`release_io_after_vlls`].
 
 use core::cell::Cell;
 use core::time::Duration;
@@ -50,7 +49,7 @@ pub enum SleepMode {
     PartialStop2,
     /// System and bus clocks stopped, clock sources running: fast wakeup.
     PartialStop1,
-    /// Normal STOP. The fast IRC (time driver) and, in PEE, the PLL are kept running.
+    /// Normal STOP. The fast IRC and, in PEE, the PLL are kept running.
     Stop,
     /// Very low power stop.
     ///
@@ -96,7 +95,8 @@ pub enum WakeEdge {
 pub enum Wake<'a> {
     /// An edge on an LLWU capable pin (see the chip's LLWU_Pn assignments). Panics for others.
     Pin(&'a Input<'a>, WakeEdge),
-    /// LPTMR0 on the 1 kHz LPO, 1 ms to 65535 ms. Not available in VLLS0.
+    /// LPTMR0 on the 1 kHz LPO, 1 ms to 65536 ms. Not available in VLLS0 or while the LPTMR time
+    /// driver owns the peripheral.
     Timeout(Duration),
 }
 
@@ -161,7 +161,7 @@ fn apply_sleep_mode(mode: SleepMode, pll: bool) {
         );
     }
 
-    // Keep the selected IRC (the time driver's clock) and, in PEE, the PLL alive through stop.
+    // Keep the selected IRC and, in PEE, the PLL alive through stop.
     MCG.c1().modify(|w| w.set_irefsten(deep));
     if pll {
         MCG.c5().modify(|w| w.set_pllsten(deep));
@@ -245,8 +245,10 @@ fn llwu_input(bank: Bank, pin: u8) -> Option<u8> {
 /// after that reset [`woke_from_vlls`] is true and the pins stay frozen until
 /// [`release_io_after_vlls`]. Not available with a PLL clock configuration.
 ///
-/// The executor is not running while this blocks, and `embassy-time` does not advance. The LLWU
-/// token is required for every call. Pass the LPTMR0 token when `wake` contains a timeout.
+/// The executor is not running while this blocks. The LPTMR time driver's counter continues in
+/// LLS, but queued timers are not LLWU wake sources. The LLWU token is required for every call.
+/// Pass the LPTMR0 token when `wake` contains a timeout; that token is unavailable when the LPTMR
+/// time driver is enabled.
 pub fn stop(
     _llwu: &mut Peri<'_, peripherals::LLWU>,
     lptmr: Option<&mut Peri<'_, peripherals::LPTMR0>>,
@@ -306,14 +308,14 @@ pub fn stop(
             }
             Wake::Timeout(duration) => {
                 assert!(mode != LeakageMode::Vlls0, "the LPTMR has no clock in VLLS0");
-                let ms = duration.as_millis().clamp(1, u16::MAX as u128) as u16;
+                let ticks = duration.as_millis().clamp(1, u16::MAX as u128 + 1) as u32;
                 LPTMR0.csr().write(|_| {});
                 LPTMR0.psr().write(|w| {
                     // Clock 1 is the 1 kHz LPO; bypass the prescaler for 1 ms ticks.
                     w.set_pcs(Pcs::_01);
                     w.set_pbyp(true);
                 });
-                LPTMR0.cmr().write(|w| w.set_compare(ms));
+                LPTMR0.cmr().write(|w| w.set_compare((ticks - 1) as u16));
                 LPTMR0.csr().write(|w| w.set_ten(true));
                 // TIE must be set only after TEN. The hardware forbids changing CSR[5:1] in
                 // the write that enables the timer.
