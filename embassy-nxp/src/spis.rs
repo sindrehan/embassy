@@ -3,6 +3,8 @@
 //! Each transfer covers one active-low PCS0 assertion and completes when PCS0 is deasserted.
 //! Receive and transmit buffers are upper bounds: extra received bytes are discarded, and the
 //! configured over-read character is sent after the transmit buffer is exhausted.
+//! An armed transfer prevents deep sleep, including while waiting for the master to select it.
+//! Cancel the transfer before entering an application state that allows STOP or VLPS.
 #![macro_use]
 
 use core::cell::RefCell;
@@ -10,6 +12,7 @@ use core::marker::PhantomData;
 
 use critical_section::Mutex;
 use embassy_hal_internal::drop::OnDrop;
+use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_hal_internal::{Peri, PeripheralType};
 pub use embedded_hal_1::spi::{Phase, Polarity};
 
@@ -70,6 +73,7 @@ impl Default for Config {
 pub(crate) struct Info {
     pub(crate) regs: Regs,
     pub(crate) fifo_depth: u8,
+    pub(crate) disable_clock: fn(),
 }
 
 pub(crate) struct State {
@@ -117,12 +121,24 @@ impl Transfer {
 /// The KL82 DSPI peripheral supports 8-bit, MSB-first slave transfers using PCS0 as its
 /// active-low slave-select input. There is no embedded-hal SPI slave trait, so transfers use this
 /// type's inherent methods.
+///
+/// Dropping the driver disables the peripheral clock and interrupt source and disconnects all
+/// four pins. Construct it with reborrowed peripherals and pins to reuse them after dropping it.
+/// Cancellation waits for an in-progress hardware frame to end; the master must finish clocking
+/// that frame or deassert PCS0.
 pub struct Spis<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
+    pins: [Flex<'d>; 3],
     select: Flex<'d>,
+    irq: Option<Irq>,
     orc: u8,
     _phantom: PhantomData<M>,
+}
+
+struct Irq {
+    interrupt: crate::pac::Interrupt,
+    intmux_source: Option<u8>,
 }
 
 impl<'d> Spis<'d, Blocking> {
@@ -142,7 +158,7 @@ impl<'d> Spis<'d, Blocking> {
             (pcs.pcr(), pcs.alt()),
             &config,
         );
-        Self::new_inner::<T>(pcs, config.orc)
+        Self::new_inner::<T>([Flex::new(sck), Flex::new(sout), Flex::new(sin)], pcs, config.orc, None)
     }
 
     /// Receive and transmit during one PCS0 assertion.
@@ -179,6 +195,7 @@ impl<'d> Spis<'d, Blocking> {
     }
 
     fn blocking_inner(&mut self, rx: usize, rx_len: usize, tx: usize, tx_len: usize) -> Result<(usize, usize), Error> {
+        let _wake_guard = crate::power::wake_guard();
         prepare(self.info, self.state, rx, rx_len, tx, tx_len, self.orc);
         self.select.arm_rising_edge_flag();
         run(self.info);
@@ -213,7 +230,15 @@ impl<'d> Spis<'d, Async> {
             &config,
         );
         enable_interrupt::<T>();
-        Self::new_inner::<T>(pcs, config.orc)
+        Self::new_inner::<T>(
+            [Flex::new(sck), Flex::new(sout), Flex::new(sin)],
+            pcs,
+            config.orc,
+            Some(Irq {
+                interrupt: T::Interrupt::IRQ,
+                intmux_source: T::INTMUX_SOURCE,
+            }),
+        )
     }
 
     /// Receive and transmit during one PCS0 assertion.
@@ -260,6 +285,7 @@ impl<'d> Spis<'d, Async> {
         tx: usize,
         tx_len: usize,
     ) -> Result<(usize, usize), Error> {
+        let _wake_guard = crate::power::wake_guard();
         let info = self.info;
         let state = self.state;
         prepare(info, state, rx, rx_len, tx, tx_len, self.orc);
@@ -278,14 +304,38 @@ impl<'d> Spis<'d, Async> {
 }
 
 impl<'d, M: Mode> Spis<'d, M> {
-    fn new_inner<T: Instance>(pcs: Peri<'d, impl PcsPin<T>>, orc: u8) -> Self {
+    fn new_inner<T: Instance>(pins: [Flex<'d>; 3], pcs: Peri<'d, impl PcsPin<T>>, orc: u8, irq: Option<Irq>) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
+            pins,
             select: Flex::new(pcs),
+            irq,
             orc,
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<'d, M: Mode> Drop for Spis<'d, M> {
+    fn drop(&mut self) {
+        abort(self.info, self.state);
+        self.info.regs.mcr().modify(|w| w.set_mdis(true));
+
+        if let Some(irq) = &self.irq {
+            if let Some(source) = irq.intmux_source {
+                crate::intmux::disable_source(crate::intmux::CHANNEL, source);
+            } else {
+                irq.interrupt.disable();
+                irq.interrupt.unpend();
+            }
+        }
+
+        for pin in &mut self.pins {
+            pin.set_as_disconnected();
+        }
+        self.select.set_as_disconnected();
+        (self.info.disable_clock)();
     }
 }
 
@@ -456,8 +506,9 @@ fn abort(info: &'static Info, state: &'static State) {
 fn enable_interrupt<T: InterruptInstance>() {
     if let Some(source) = T::INTMUX_SOURCE {
         crate::intmux::enable_source(crate::intmux::CHANNEL, source);
+    } else {
+        T::Interrupt::unpend();
     }
-    T::Interrupt::unpend();
     unsafe { T::Interrupt::enable() };
 }
 
@@ -531,6 +582,7 @@ macro_rules! impl_spis_instance {
                 static INFO: crate::spis::Info = crate::spis::Info {
                     regs: crate::pac::$inst,
                     fifo_depth: $fifo_depth,
+                    disable_clock: crate::clocks::disable::<crate::peripherals::$inst>,
                 };
                 &INFO
             }

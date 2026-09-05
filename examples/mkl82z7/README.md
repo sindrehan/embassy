@@ -56,7 +56,10 @@ the reset clock configuration.
 - `spi_loopback`: tests blocking, interrupt-driven, and DMA-backed SPI
   transfers; connect D11 to D12.
 - `spi_link_master` and `spi_link_slave`: exchange checked frames between two
-  FRDM-KL82Z boards using SPI0 and SPI1.
+  FRDM-KL82Z boards using SPI0 and SPI1. The slave releases SPI1 and sleeps in
+  VLPS between exchanges, then reinitializes the peripheral and pins.
+- `spis_lifecycle`: checks slave cancellation, wake guards, peripheral/pin reuse
+  and shared-interrupt cleanup. Leave PTC4..PTC7, PTC10/PTC11 and PTD4..PTD7 unconnected.
 - `intmux`: routes I2C1 and LPUART2 through an INTMUX channel.
 - `sleep_modes`: exercises the idle sleep modes in RUN and VLPR.
 - `vlps_pll`: runs at 72 MHz from the PLL, idles in VLPS, and verifies that
@@ -86,16 +89,24 @@ master and slave data pins cross.
 | D12 / PTC7 / SPI0_SIN | J22 pin 6 / PTD6 / SPI1_SOUT |
 | D10 / PTC4 / GPIO select | J22 pin 4 / PTD4 / SPI1_PCS0 |
 
-Run `spi_link_slave` before `spi_link_master`, using a separate terminal for
-each board:
+When both probes are connected, use `probe-rs list` to find their
+`VID:PID:SERIAL` selectors and set `PROBE_RS_PROBE` for each board's terminal.
+
+VLPS can interrupt live SWD/RTT access. Flash and reset the slave without a
+logging session, then read the verified replies on the master:
 
 ```sh
-cargo run --release --bin spi_link_slave
-cargo run --release --bin spi_link_master
+cargo build --release --bin spi_link_slave
+probe-rs download --chip MKL82Z128VLK7 --protocol swd --connect-under-reset \
+  target/thumbv6m-none-eabi/release/spi_link_slave
+probe-rs reset --chip MKL82Z128VLK7 --protocol swd --connect-under-reset
 ```
 
-When both probes are connected, select each one by including its serial number
-in `PROBE_RS_PROBE`, using the form `1366:1015:<serial>`.
+In the master's terminal:
+
+```sh
+cargo run --release --bin spi_link_master
+```
 
 The red LED toggles for every valid frame. RTT logs on the master report each
 verified reply; replies are returned one exchange after their requests because
