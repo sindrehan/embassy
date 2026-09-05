@@ -104,7 +104,7 @@ class ExecutionTests(unittest.TestCase):
             patch.object(run, "command", return_value=output) as command,
             patch.object(run.shutil, "copy2") as copy,
         ):
-            saved = Path(folder) / "firmware" / "adc"
+            saved = Path(folder) / "firmware" / "adc.elf"
             self.assertEqual(run.build("lptmr", True, Path(folder)), {"adc": saved})
             copy.assert_called_once_with("/tmp/adc", saved)
             argv = command.call_args.args[0]
@@ -119,7 +119,7 @@ class ExecutionTests(unittest.TestCase):
         )
         self.assertLess(script.index("quit 1"), script.index('printf "HIL PASS\\n"'))
 
-    def test_link_failure_still_parks_both_boards_and_reports(self):
+    def check_link_cleanup(self, error, exit_code, status):
         with tempfile.TemporaryDirectory() as folder:
             argv = [
                 "run.py",
@@ -143,10 +143,10 @@ class ExecutionTests(unittest.TestCase):
                 patch.object(run, "program") as program,
             ):
                 with (
-                    patch.object(run, "run_gdb", side_effect=RuntimeError("fault")),
+                    patch.object(run, "run_gdb", side_effect=error),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(run.main(), 1)
+                    self.assertEqual(run.main(), exit_code)
                 last = program.call_args_list[-2:]
                 self.assertEqual(
                     [call.args[1] for call in last],
@@ -154,8 +154,20 @@ class ExecutionTests(unittest.TestCase):
                 )
                 self.assertTrue(all(call.args[2] == Path("park") for call in last))
             report = json.loads(next(Path(folder).rglob("summary.json")).read_text())
-            self.assertEqual(report["results"][0]["status"], "FAIL")
-            self.assertEqual(report["results"][0]["error"], "fault")
+            self.assertEqual(report["results"][0]["status"], status)
+            return report
+
+    def test_link_failure_still_parks_both_boards_and_reports(self):
+        report = self.check_link_cleanup(RuntimeError("fault"), 1, "FAIL")
+        self.assertEqual(report["results"][0]["error"], "fault")
+
+    def test_link_success_parks_both_boards(self):
+        self.check_link_cleanup(None, 0, "PASS")
+
+    def test_interrupted_link_parks_both_boards_and_reports(self):
+        report = self.check_link_cleanup(KeyboardInterrupt(), 130, "FAIL")
+        self.assertEqual(report["results"][0]["error"], "interrupted")
+        self.assertEqual(report["error"], "interrupted")
 
 
 if __name__ == "__main__":

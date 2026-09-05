@@ -48,12 +48,14 @@ its wiring; there is no combined group because the fixtures are incompatible.
 | `low-power` | No external signals on UART or LED pins | ADC wake guards, PLL restoration, idle sleep modes, LPTMR alarms and full counter wrap |
 | `isolated` | PTC4–PTC7, PTC10/PTC11 and PTD4–PTD7 undriven | SPI slave lifecycle/shared IRQ cleanup, DMA-only SPI in-place completion, SPI master wake guard |
 | `loopback` | Jumper D11/PTC6 to D12/PTC7; remove other SPI wiring | GPIO waits/cancellation, SPI blocking/IRQ/DMA transfers |
-| `link` | Two boards wired below; no loopback jumper | 260 exchanges, checked pipelined replies, slave cancellation-free teardown/recreation and VLPS between frames |
+| `link` | Two boards wired below; no loopback jumper | 260 exchanges, checked pipelined replies, slave teardown/recreation and VLPS between frames |
 | `low-leakage` | No external wake signals; TPM driver only | LLS3 timeout wake and VLLS3 reset wake |
 
 The `low-leakage` test resets the core on VLLS exit. A debugger that cannot
 preserve the completion breakpoint across that reset cannot verify this test;
 a disconnect or timeout is not evidence of success.
+After low-leakage debug loss, reflashing may require a target power cycle or
+recovery with SEGGER's J-Link tools.
 
 When a second board is wired in, pass `--peer-probe VID:PID:SERIAL`. The runner
 first flashes an idle, high-impedance fixture to that board. This permits the

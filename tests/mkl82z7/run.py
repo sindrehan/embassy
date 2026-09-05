@@ -137,7 +137,7 @@ def build(driver, vlpr, directory):
         item = json.loads(line)
         if item.get("reason") == "compiler-artifact" and item.get("executable"):
             name = item["target"]["name"]
-            destination = firmware / name
+            destination = firmware / f"{name}.elf"
             shutil.copy2(item["executable"], destination)
             artifacts[name] = destination
     return artifacts
@@ -237,7 +237,7 @@ def run_gdb(args, binary, timeout, prefix):
                     raise RuntimeError(f"J-Link did not become ready; see {server_log}")
                 time.sleep(0.05)
             result = command(
-                [args.gdb, "-q", "-batch", str(binary), "-x", str(script)],
+                [args.gdb, "-nx", "-q", "-batch", str(binary), "-x", str(script)],
                 prefix.with_suffix(".gdb.log"),
                 timeout + 5,
             )
@@ -313,7 +313,10 @@ def main():
     if not args.park and not any(tests for _, tests in selections):
         parser.error("no tests match this time driver")
     if (
-        any(name == "spi_link_master" for _, tests in selections for name, _ in tests)
+        not args.park
+        and any(
+            name == "spi_link_master" for _, tests in selections for name, _ in tests
+        )
         and not args.peer_probe
     ):
         parser.error("the link test requires --peer-probe for the slave")
@@ -328,6 +331,7 @@ def main():
         "results": [],
     }
     failed = False
+    interrupted = False
     try:
         for driver, tests in selections:
             if not tests and not args.park:
@@ -377,6 +381,9 @@ def main():
                 except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     result["error"] = str(error)
                     failed = True
+                except KeyboardInterrupt:
+                    result["error"] = "interrupted"
+                    raise
                 finally:
                     if name == "spi_link_master":
                         for label, probe in [
@@ -401,21 +408,24 @@ def main():
                                     str(error)
                                 )
                                 failed = True
-                result["seconds"] = round(time.monotonic() - started, 3)
-                report["results"].append(result)
-                print(
-                    f"{result['status']:4} {driver}/{name}"
-                    + (f": {result['error']}" if "error" in result else ""),
-                    flush=True,
-                )
+                    result["seconds"] = round(time.monotonic() - started, 3)
+                    report["results"].append(result)
+                    print(
+                        f"{result['status']:4} {driver}/{name}"
+                        + (f": {result['error']}" if "error" in result else ""),
+                        flush=True,
+                    )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         report["error"] = str(error)
         failed = True
         print(f"ERROR: {error}", file=sys.stderr)
+    except KeyboardInterrupt:
+        report["error"] = "interrupted"
+        interrupted = True
     finally:
         (directory / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"Logs: {directory}", flush=True)
-    return 1 if failed else 0
+    return 130 if interrupted else int(failed)
 
 
 if __name__ == "__main__":
