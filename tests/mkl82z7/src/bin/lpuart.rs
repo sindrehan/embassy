@@ -5,11 +5,13 @@
 #![no_std]
 #![no_main]
 
+teleprobe_meta::target!(b"frdm-kl82z");
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_nxp::lpuart::{Config, InterruptHandler, Lpuart};
 use embassy_nxp::{bind_interrupts, pac, peripherals};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Duration, with_timeout};
 
 bind_interrupts!(struct Irqs {
@@ -32,7 +34,7 @@ fn loopback() {
 
 #[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
-    let p = embassy_nxp::init(Default::default());
+    let mut p = embassy_nxp::init(Default::default());
     defmt::info!("lpuart loopback: LPUART0 at 115200");
 
     let mut pattern = [0u8; 64];
@@ -42,7 +44,13 @@ async fn main(_spawner: Spawner) {
 
     // Async: write and read concurrently, since the receive FIFO holds only 8 bytes.
     {
-        let uart = Lpuart::new(p.LPUART0, p.PTB17, p.PTB16, Irqs, Config::default());
+        let uart = Lpuart::new(
+            p.LPUART0.reborrow(),
+            p.PTB17.reborrow(),
+            p.PTB16.reborrow(),
+            Irqs,
+            Config::default(),
+        );
         loopback();
         let (mut tx, mut rx) = uart.split();
         let mut got = [0u8; 64];
@@ -58,17 +66,9 @@ async fn main(_spawner: Spawner) {
 
     // Blocking, on a fresh driver over the same instance and pins.
     {
-        // The async driver above has been dropped, so stealing the singletons again is sound.
-        let (lpuart, tx, rx) = unsafe {
-            (
-                peripherals::LPUART0::steal(),
-                peripherals::PTB17::steal(),
-                peripherals::PTB16::steal(),
-            )
-        };
         let mut config = Config::default();
         config.baudrate = 9600;
-        let mut uart = Lpuart::new_blocking(lpuart, tx, rx, config);
+        let mut uart = Lpuart::new_blocking(p.LPUART0, p.PTB17, p.PTB16, config);
         loopback();
         let mut got = [0u8; 64];
         // blocking_write returns once the bytes are queued, so go FIFO-sized chunk by chunk to
@@ -82,5 +82,5 @@ async fn main(_spawner: Spawner) {
     }
 
     defmt::info!("lpuart loopback passed");
-    embassy_nxp_mkl82z7_examples::exit()
+    embassy_nxp_mkl82z7_tests::pass()
 }

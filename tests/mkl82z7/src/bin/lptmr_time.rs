@@ -1,9 +1,11 @@
 //! LPTMR-backed `embassy-time` in VLPR and VLPS.
 //!
-//! The short race exercises moving an armed alarm earlier. The 34-second run crosses the
-//! 16-bit time counter's half-period checkpoint before the LED continues blinking once a second.
+//! Checks alarm rescheduling and monotonic time across a full 16-bit counter wrap.
 #![no_std]
 #![no_main]
+
+teleprobe_meta::target!(b"frdm-kl82z");
+teleprobe_meta::timeout!(90);
 
 use core::fmt::Write as _;
 
@@ -14,8 +16,8 @@ use embassy_nxp::clocks::ClockConfig;
 use embassy_nxp::gpio::{Level, Output};
 use embassy_nxp::lpuart::{self, Lpuart};
 use embassy_nxp::power::SleepMode;
-use embassy_nxp_mkl82z7_examples as _;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_nxp_mkl82z7_tests as _;
+use embassy_time::{Instant, Timer};
 
 fn log(uart: &mut Lpuart<'_, Blocking>, args: core::fmt::Arguments<'_>) {
     let mut line = heapless::String::<128>::new();
@@ -27,8 +29,10 @@ fn log(uart: &mut Lpuart<'_, Blocking>, args: core::fmt::Arguments<'_>) {
 
 #[embassy_executor::main(executor = "embassy_nxp::executor::Executor", entry = "cortex_m_rt::entry")]
 async fn main(_spawner: Spawner) {
-    let mut config = embassy_nxp::config::Config::default();
-    config.clocks = ClockConfig::vlpr();
+    let mut config = embassy_nxp::config::Config {
+        clocks: ClockConfig::vlpr(),
+        ..Default::default()
+    };
     config.power.sleep_mode = SleepMode::VeryLowPowerStop;
     let p = embassy_nxp::init(config);
 
@@ -46,16 +50,16 @@ async fn main(_spawner: Spawner) {
     log(&mut uart, format_args!("earlier alarm fired after {} ms", race_elapsed));
 
     let checkpoint_start = Instant::now();
-    for _ in 0..34 {
+    let mut previous = checkpoint_start;
+    for _ in 0..66 {
         Timer::after_secs(1).await;
+        let now = Instant::now();
+        assert!(now > previous);
+        previous = now;
         led.toggle();
     }
     let checkpoint_elapsed = checkpoint_start.elapsed().as_millis();
-    assert!((34_000..34_200).contains(&checkpoint_elapsed));
-    log(&mut uart, format_args!("34 timer wakes took {} ms", checkpoint_elapsed));
-
-    loop {
-        led.toggle();
-        Timer::after(Duration::from_secs(1)).await;
-    }
+    assert!((66_000..66_400).contains(&checkpoint_elapsed));
+    log(&mut uart, format_args!("66 timer wakes took {} ms", checkpoint_elapsed));
+    embassy_nxp_mkl82z7_tests::pass()
 }

@@ -1,0 +1,8 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+runner = "teleprobe local run --chip MKL82Z128VLK7 --protocol swd --elf"
+
+[env]
+DEFMT_LOG = "debug"

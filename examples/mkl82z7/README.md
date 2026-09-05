@@ -1,120 +1,88 @@
-# MKL82Z7 examples
+# FRDM-KL82Z examples
 
-These examples target the NXP FRDM-KL82Z board. The default runner uses
-probe-rs with the onboard J-Link-compatible OpenSDA probe:
+Small examples for the NXP MKL82Z128VLK7 and Embassy.
 
-```sh
-cargo run --bin blinky
-```
+## Run
 
-The runner connects under reset so that firmware which enters a low-power mode
-can still be replaced.
-
-Async examples use the Kinetis executor so clock recovery completes before an
-interrupt handler runs after waking from VLPS.
-
-The examples use the 1 MHz TPM time driver by default. To use the 1 kHz LPTMR
-driver instead, disable the default feature and enable `time-driver-lptmr`:
+Install the `thumbv6m-none-eabi` Rust target and a `probe-rs` build with MKL82
+support. Connect the board's OpenSDA USB port, then:
 
 ```sh
-cargo run --release --no-default-features --features time-driver-lptmr --bin lptmr_time
+cd examples/mkl82z7
+cargo run --release --bin blinky
 ```
 
-## Board connections
+The runner connects over SWD under reset. With multiple probes connected, use
+`probe-rs list` and set `PROBE_RS_PROBE=VID:PID:SERIAL` to select the board.
 
-- The RGB LED is active low: red PTC1, green PTC2, blue PTC0.
-- SW2 is active low on PTA4/NMI.
-- SW3 is active low on PTD0/LLWU_P12.
-- The OpenSDA virtual serial port is connected to LPUART0 on PTB17 (TX) and
-  PTB16 (RX).
-- The FXOS8700CQ accelerometer is connected to I2C0 on PTD2 (SCL) and PTD3
-  (SDA), at address `0x1c`.
-- SPI0 is available on PTC5 (SCK, D13), PTC6 (SOUT, D11), and PTC7 (SIN,
-  D12). PTC4 (D10) is SPI0_PCS0.
+The default time driver uses TPM at 1 MHz. To use LPTMR at 1 kHz:
 
-The board uses a 12 MHz crystal. Examples which call `ClockConfig::pll()` run
-the core at 72 MHz and the bus and flash clocks at 24 MHz. Other examples use
-the reset clock configuration.
+```sh
+cargo run --release --no-default-features --features time-driver-lptmr --bin blinky
+```
+
+Async examples use the Kinetis executor, which restores the clocks before
+interrupts run after a VLPS wakeup.
 
 ## Examples
 
-- `blinky`: blinks the RGB LED with the PLL clock configuration.
-- `pwm_rgb`: fades the RGB LED between colors. TPM0 drives red and green, and
-  FlexIO timer 0 drives blue on PTC0/FXIO0_D12.
-- `adc`: samples PTB0, VREFL, and VREFH with calibrated 16-bit conversions and
-  32-sample hardware averaging. PTB0 is on J4 pin 12 (B6).
-- `adc_low_power`: checks ADC completion after VLPS and wake-guard release on
-  completion and cancellation. No external connections are required.
-- `hello`: reports the configured clocks and runs a short CPU benchmark.
-- `gpio_irq`: exercises GPIO edge and level waits; connect D11 to D12.
-- `serial`: echoes bytes on the OpenSDA virtual serial port at 115200 baud.
-- `lpuart_loopback`: tests interrupt-driven and blocking LPUART transfers with
-  internal loopback enabled.
-- `lpuart_dma`: tests DMA-backed LPUART transfers with internal loopback.
-- `i2c_accel`: checks timeout recovery, then reads the onboard accelerometer
-  with blocking, interrupt-driven, and DMA-backed I2C transfers.
-- `spi_loopback`: tests blocking, interrupt-driven, and DMA-backed SPI
-  transfers; connect D11 to D12.
-- `spi_link_master` and `spi_link_slave`: exchange checked frames between two
-  FRDM-KL82Z boards using SPI0 and SPI1. The slave releases SPI1 and sleeps in
-  VLPS between exchanges, then reinitializes the peripheral and pins.
-- `spis_lifecycle`: checks slave cancellation, wake guards, peripheral/pin reuse
-  and shared-interrupt cleanup. Leave PTC4..PTC7, PTC10/PTC11 and PTD4..PTD7 unconnected.
-- `intmux`: routes I2C1 and LPUART2 through an INTMUX channel.
-- `sleep_modes`: exercises the idle sleep modes in RUN and VLPR.
-- `vlps_pll`: runs at 72 MHz from the PLL, idles in VLPS, and verifies that
-  each timer wake restores PEE before application code runs.
-- `lptmr_time`: checks short alarms and the 16-bit counter extension while the
-  executor idles in VLPS. Requires the `time-driver-lptmr` feature.
-- `low_power`: enters VLPS, LLS3, and VLLS3, waking from SW3 or an LPTMR
-  timeout. VLLS wakeup resets the MCU, and the example reports the retained
-  wake source after restart. Requires the default `time-driver-tpm` feature
-  because the LPTMR time driver owns both LPTMR instances.
+| Example | Demonstrates | Connections |
+| --- | --- | --- |
+| `hello` | Periodic RTT logging | None |
+| `blinky` | GPIO output and async delay | Onboard red LED |
+| `gpio_irq` | Async button input | Onboard SW3 |
+| `pwm_rgb` | RGB color fading with TPM and FlexIO PWM | Onboard RGB LED |
+| `adc` | Calibrated ADC with 32-sample averaging | PTB0 on J4 pin 12: GND or 3.3 V |
+| `serial` | Async UART echo at 115200 baud, 8N1 | OpenSDA virtual serial port |
+| `i2c_accel` | Async accelerometer reads | Onboard FXOS8700CQ |
+| `spi_loopback` | Async SPI transfer | Jumper D11 to D12; disconnect other SPI devices |
+| `spi_link_master`, `spi_link_slave` | Two-board SPI request/reply | See below |
+| `low_power` | VLPR with VLPS between timer wakes | Onboard red LED |
 
-The LPUART clock must remain active for asynchronous serial reception in STOP
-or VLPS. The supplied configurations use the fast internal reference clock
-when appropriate.
+Hardware assertions, stress tests, DMA loopback and power-mode verification live
+in [tests/mkl82z7](../../tests/mkl82z7).
+
+## Board signals
+
+- RGB LED, active low: red PTC1, green PTC2, blue PTC0.
+- SW3, active low: PTD0.
+- OpenSDA serial: PTB17 TX, PTB16 RX.
+- FXOS8700CQ: I2C0 on PTD2 SCL and PTD3 SDA, address `0x1c`.
+
+The board has a 12 MHz crystal. The default HAL configuration uses the reset
+clock; `pwm_rgb` configures the PLL for a 72 MHz core. The shared flash
+configuration leaves the device unsecured and boots internal flash in RUN with
+NMI disabled.
 
 ## Two-board SPI link
 
-Remove the D11-to-D12 loopback jumper, if fitted, then connect the boards as
-follows. Signal names are from the KL82 peripheral's point of view, so the
-master and slave data pins cross.
+Remove any D11-to-D12 loopback jumper, then connect:
 
 | Master board | Slave board |
 | --- | --- |
 | GND | GND |
-| D13 / PTC5 / SPI0_SCK | J22 pin 5 / PTD5 / SPI1_SCK |
-| D11 / PTC6 / SPI0_SOUT | J22 pin 7 / PTD7 / SPI1_SIN |
-| D12 / PTC7 / SPI0_SIN | J22 pin 6 / PTD6 / SPI1_SOUT |
-| D10 / PTC4 / GPIO select | J22 pin 4 / PTD4 / SPI1_PCS0 |
+| D13 / PTC5 / SCK | J22 pin 5 / PTD5 / SCK |
+| D11 / PTC6 / SOUT | J22 pin 7 / PTD7 / SIN |
+| D12 / PTC7 / SIN | J22 pin 6 / PTD6 / SOUT |
+| D10 / PTC4 / GPIO select | J22 pin 4 / PTD4 / PCS0 |
 
-When both probes are connected, use `probe-rs list` to find their
-`VID:PID:SERIAL` selectors and set `PROBE_RS_PROBE` for each board's terminal.
+Flash `spi_link_slave` to the slave first, then run `spi_link_master` on the
+master. Use a separate terminal with the appropriate `PROBE_RS_PROBE` for each
+board. The master sends a counter; the slave adds one and returns it on the
+**next** exchange, because SPI shifts both directions simultaneously. The first
+reply is zero.
 
-VLPS can interrupt live SWD/RTT access. Flash and reset the slave without a
-logging session, then read the verified replies on the master:
+## Low power
+
+VLPS can interrupt live SWD/RTT access. Build, flash and reset without a logging
+session:
 
 ```sh
-cargo build --release --bin spi_link_slave
+cargo build --release --bin low_power
 probe-rs download --chip MKL82Z128VLK7 --protocol swd --connect-under-reset \
-  target/thumbv6m-none-eabi/release/spi_link_slave
+  target/thumbv6m-none-eabi/release/low_power
 probe-rs reset --chip MKL82Z128VLK7 --protocol swd --connect-under-reset
 ```
 
-In the master's terminal:
-
-```sh
-cargo run --release --bin spi_link_master
-```
-
-The red LED toggles for every valid frame. RTT logs on the master report each
-verified reply; replies are returned one exchange after their requests because
-SPI shifts both directions at the same time.
-
-## Flash configuration
-
-`memory.x` reserves the flash configuration field at `0x400..0x40f`. The value
-in `src/lib.rs` leaves the device unsecured, enables mass erase, boots from
-internal flash, disables NMI, selects fast initialization, and enters RUN after
-reset.
+The LED flashes briefly every two seconds. Disconnect the debugger before
+measuring current.

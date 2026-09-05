@@ -1,4 +1,4 @@
-//! Test protocol shared by the SPI link master and slave examples.
+//! Frame pattern and checksum shared by the two-board SPI tests.
 
 pub const FRAME_LEN: usize = 16;
 

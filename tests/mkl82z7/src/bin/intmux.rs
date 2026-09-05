@@ -10,12 +10,14 @@
 #![no_std]
 #![no_main]
 
+teleprobe_meta::target!(b"frdm-kl82z");
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_nxp::i2c::{self, I2c};
 use embassy_nxp::lpuart::{self, Lpuart};
 use embassy_nxp::{bind_interrupts, pac, peripherals};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Duration, with_timeout};
 
 bind_interrupts!(struct Irqs {
@@ -69,5 +71,5 @@ async fn main(_spawner: Spawner) {
         vec
     );
     defmt::info!("intmux passed");
-    embassy_nxp_mkl82z7_examples::exit()
+    embassy_nxp_mkl82z7_tests::pass()
 }

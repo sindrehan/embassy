@@ -1,9 +1,10 @@
 //! Runs from the 72 MHz PLL and enters VLPS whenever the executor is idle.
 //!
-//! The red LED toggles once per second. Each wake verifies that the MCG has returned to PEE and
-//! writes the result to the OpenSDA serial port on LPUART0.
+//! Each of 32 timer wakes must restore PEE before the task resumes.
 #![no_std]
 #![no_main]
+
+teleprobe_meta::target!(b"frdm-kl82z");
 
 use core::fmt::Write as _;
 
@@ -14,7 +15,7 @@ use embassy_nxp::lpuart::{self, Lpuart};
 use embassy_nxp::pac::mcg::vals::Clkst;
 use embassy_nxp::power::SleepMode;
 use embassy_nxp::{Blocking, bind_interrupts, peripherals};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Instant, Timer};
 
 bind_interrupts!(struct Irqs {
@@ -56,8 +57,8 @@ async fn main(_spawner: Spawner) {
 
     log(&mut uart, format_args!("72 MHz PEE; executor idle enters VLPS"));
 
-    loop {
-        Timer::after_secs(1).await;
+    for _ in 0..32 {
+        Timer::after_millis(20).await;
 
         let status = embassy_nxp::pac::MCG.s().read();
         assert_eq!(status.clkst(), Clkst::_11);
@@ -74,4 +75,5 @@ async fn main(_spawner: Spawner) {
             ),
         );
     }
+    embassy_nxp_mkl82z7_tests::pass()
 }

@@ -1,10 +1,12 @@
 //! Walks the idle sleep modes and checks that embassy-time keeps waking the
 //! core in each: ten 250 ms timers should take 2500 ms. Logs over LPUART0
 //! (OpenSDA serial port) because the debugger loses the core in the deep
-//! modes; start it without an attached session (see the README). Set `VLPR`
-//! to run the same walk from very low power run.
+//! modes. Use the test runner to check completion. Enable `vlpr` to run the
+//! same walk from very low power run.
 #![no_std]
 #![no_main]
+
+teleprobe_meta::target!(b"frdm-kl82z");
 
 use core::fmt::Write as _;
 
@@ -14,10 +16,10 @@ use embassy_nxp::gpio::{Level, Output};
 use embassy_nxp::lpuart::{self, Lpuart};
 use embassy_nxp::power::{self, SleepMode};
 use embassy_nxp::{Blocking, pac};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Instant, Timer};
 
-const VLPR: bool = false;
+const VLPR: bool = cfg!(feature = "vlpr");
 
 fn log(uart: &mut Lpuart<'_, Blocking>, args: core::fmt::Arguments<'_>) {
     let mut line = heapless::String::<160>::new();
@@ -66,6 +68,7 @@ async fn main(_spawner: Spawner) {
             led.toggle();
             Timer::after_millis(250).await;
         }
+        assert!((2500..2600).contains(&start.elapsed().as_millis()));
         log(
             &mut uart,
             format_args!(
@@ -77,5 +80,5 @@ async fn main(_spawner: Spawner) {
         );
     }
     log(&mut uart, format_args!("sleep modes done"));
-    embassy_nxp_mkl82z7_examples::exit()
+    embassy_nxp_mkl82z7_tests::pass()
 }

@@ -81,6 +81,7 @@ rm out/tests/rpi-pico/spi_async
 rm out/tests/stm32h563zi/usart_dma
 
 # tests are implemented but the HIL test farm doesn't actually have these boards, yet
+rm -rf out/tests/frdm-kl82z out/tests/frdm-kl82z-lptmr
 rm -rf out/tests/stm32c071rb
 rm -rf out/tests/stm32f100rd
 rm -rf out/tests/stm32f107vc

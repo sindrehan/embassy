@@ -3,6 +3,8 @@
 #![no_std]
 #![no_main]
 
+teleprobe_meta::target!(b"frdm-kl82z");
+
 use core::pin::pin;
 
 use embassy_executor::Spawner;
@@ -14,7 +16,7 @@ use embassy_nxp::i2c::{self, I2c};
 use embassy_nxp::power::{self, SleepMode};
 use embassy_nxp::spis::{self, Spis};
 use embassy_nxp::{Async, bind_interrupts, clocks, pac, peripherals};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Duration, Timer, with_timeout};
 
 bind_interrupts!(struct Irqs {
@@ -156,5 +158,5 @@ async fn main(_spawner: Spawner) {
 
     power::set_sleep_mode(SleepMode::Wait);
     defmt::info!("SPI slave cancellation and lifecycle checks passed");
-    embassy_nxp_mkl82z7_examples::exit()
+    embassy_nxp_mkl82z7_tests::pass()
 }

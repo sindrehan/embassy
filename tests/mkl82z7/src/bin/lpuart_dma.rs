@@ -6,11 +6,13 @@
 #![no_std]
 #![no_main]
 
+teleprobe_meta::target!(b"frdm-kl82z");
+
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_nxp::lpuart::{self, Lpuart};
 use embassy_nxp::{bind_interrupts, pac, peripherals};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Duration, Instant, with_timeout};
 
 bind_interrupts!(struct Irqs {
@@ -83,5 +85,5 @@ async fn main(_spawner: Spawner) {
     check("LPUART0 at 1 Mbaud", uart, pac::LPUART0, &pattern, &mut got).await;
 
     defmt::info!("lpuart dma passed");
-    embassy_nxp_mkl82z7_examples::exit()
+    embassy_nxp_mkl82z7_tests::pass()
 }

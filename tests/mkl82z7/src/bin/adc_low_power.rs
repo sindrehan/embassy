@@ -2,6 +2,8 @@
 #![no_std]
 #![no_main]
 
+teleprobe_meta::target!(b"frdm-kl82z");
+
 use core::pin::pin;
 
 use embassy_executor::Spawner;
@@ -10,7 +12,7 @@ use embassy_nxp::adc::{Adc, Averaging, Config, InternalChannel, Resolution};
 use embassy_nxp::clocks::{ClockConfig, ExternalClock, ExternalSource};
 use embassy_nxp::power::{self, SleepMode};
 use embassy_nxp::{bind_interrupts, pac, peripherals};
-use embassy_nxp_mkl82z7_examples as _;
+use embassy_nxp_mkl82z7_tests as _;
 use embassy_time::{Duration, Timer, with_timeout};
 
 bind_interrupts!(struct Irqs {
@@ -67,5 +69,5 @@ async fn main(_spawner: Spawner) {
 
     power::set_sleep_mode(SleepMode::Wait);
     defmt::info!("ADC VLPS and cancellation checks passed");
-    embassy_nxp_mkl82z7_examples::exit()
+    embassy_nxp_mkl82z7_tests::pass()
 }
