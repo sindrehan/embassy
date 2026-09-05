@@ -43,6 +43,7 @@ embassy-time = { version = "0.5.1", path = "../embassy-time", optional = true }
 embassy-time-driver = { version = "0.2.2", path = "../embassy-time-driver", optional = true }
 embassy-time-queue-utils = { version = "0.3.2", path = "../embassy-time-queue-utils", optional = true }
 embedded-io = { version = "0.7.1" }
+embedded-io-async = { version = "0.7.0" }
 embedded-hal-02 = { package = "embedded-hal", version = "0.2.6", features = ["unproven"] }
 embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
 embedded-hal-async = { version = "1.0" }

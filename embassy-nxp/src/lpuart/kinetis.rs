@@ -13,9 +13,13 @@
 //! `INTMUX0_0`.
 //!
 //! Pending async reads and queued transmissions prevent deep sleep. An idle receiver does not:
-//! keep the executor in WAIT if bytes must be received without a pending read. Cancelling a read
-//! discards any bytes already copied to its buffer. Cancelling a write leaves queued bytes to
+//! keep the executor in WAIT if bytes must be received without a pending read. Cancelling an
+//! inherent read may leave a partially filled buffer. Cancelling a write leaves queued bytes to
 //! finish transmitting; deep sleep stays blocked until the final stop bit.
+//!
+//! The `embedded-io-async` traits work on the driver and its split halves. Trait reads return
+//! available bytes without filling the buffer and are cancellation-safe. They use interrupts
+//! even on DMA drivers; use the inherent `read` for DMA reception of a known-length frame.
 #![macro_use]
 
 use core::cell::RefCell;
@@ -195,6 +199,7 @@ pub struct LpuartRx<'d, M: Mode> {
     dma: Option<(Peri<'d, AnyChannel>, u8)>,
     pin: Flex<'d>,
     disable_interrupt: Option<fn()>,
+    pending_error: Option<Error>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -483,12 +488,16 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
             dma,
             pin,
             disable_interrupt,
+            pending_error: None,
             _phantom: PhantomData,
         }
     }
 
     /// One byte from the FIFO if there is one, or a pending error.
     fn try_read_byte(&mut self) -> Option<Result<u8, Error>> {
+        if let Some(error) = self.pending_error.take() {
+            return Some(Err(error));
+        }
         let regs = self.info.regs;
 
         if regs.stat().read().or() {
@@ -522,6 +531,26 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
             Some(e) => Err(e),
             None => Ok(data.0 as u8),
         })
+    }
+
+    fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let mut n = 0;
+        while n < buf.len() {
+            match self.try_read_byte() {
+                Some(Ok(byte)) => {
+                    buf[n] = byte;
+                    n += 1;
+                }
+                Some(Err(error)) if n == 0 => return Err(error),
+                Some(Err(error)) => {
+                    // Return already consumed bytes, then report the error on the next read.
+                    self.pending_error = Some(error);
+                    break;
+                }
+                None => break,
+            }
+        }
+        Ok(n)
     }
 
     /// Fill the buffer, blocking until every byte has arrived.
@@ -581,6 +610,9 @@ impl<'d> LpuartRx<'d, Async> {
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         if buffer.is_empty() {
             return Ok(());
+        }
+        if let Some(error) = self.pending_error.take() {
+            return Err(error);
         }
         let regs = self.info.regs;
         let _wake_guard = crate::power::wake_guard();
@@ -653,6 +685,31 @@ impl<'d> LpuartRx<'d, Async> {
         }
 
         Ok(())
+    }
+
+    async fn read_some(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let regs = self.info.regs;
+        let _wake_guard = crate::power::wake_guard();
+        let _on_drop = OnDrop::new(move || stop_read(regs));
+        poll_fn(|cx| {
+            self.state.rx_waker.register(cx.waker());
+            match self.read_available(buffer) {
+                Ok(0) => {
+                    critical_section::with(|_| {
+                        regs.ctrl().modify(|w| {
+                            w.set_rie(true);
+                            w.set_orie(true);
+                        })
+                    });
+                    Poll::Pending
+                }
+                result => Poll::Ready(result),
+            }
+        })
+        .await
     }
 }
 
@@ -911,7 +968,7 @@ impl<'d, M: Mode> Lpuart<'d, M> {
     }
 }
 
-impl<'d> embedded_io::ErrorType for LpuartTx<'d, Blocking> {
+impl<M: Mode> embedded_io::ErrorType for LpuartTx<'_, M> {
     type Error = Error;
 }
 
@@ -925,7 +982,7 @@ impl<'d> embedded_io::Write for LpuartTx<'d, Blocking> {
     }
 }
 
-impl<'d> embedded_io::ErrorType for LpuartRx<'d, Blocking> {
+impl<M: Mode> embedded_io::ErrorType for LpuartRx<'_, M> {
     type Error = Error;
 }
 
@@ -934,24 +991,16 @@ impl<'d> embedded_io::Read for LpuartRx<'d, Blocking> {
         if buf.is_empty() {
             return Ok(0);
         }
-        // Block for the first byte, then take whatever else is already in the FIFO.
-        self.blocking_read(&mut buf[..1])?;
-        let mut n = 1;
-        while n < buf.len() {
-            match self.try_read_byte() {
-                Some(Ok(byte)) => {
-                    buf[n] = byte;
-                    n += 1;
-                }
-                Some(Err(e)) => return Err(e),
-                None => break,
+        loop {
+            match self.read_available(buf) {
+                Ok(0) => {}
+                result => return result,
             }
         }
-        Ok(n)
     }
 }
 
-impl<'d> embedded_io::ErrorType for Lpuart<'d, Blocking> {
+impl<M: Mode> embedded_io::ErrorType for Lpuart<'_, M> {
     type Error = Error;
 }
 
@@ -968,6 +1017,42 @@ impl<'d> embedded_io::Write for Lpuart<'d, Blocking> {
 impl<'d> embedded_io::Read for Lpuart<'d, Blocking> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         embedded_io::Read::read(&mut self.rx, buf)
+    }
+}
+
+impl embedded_io_async::Read for LpuartRx<'_, Async> {
+    /// Wait for at least one byte, then return available data. Cancellation consumes no bytes.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.read_some(buf).await
+    }
+}
+
+impl embedded_io_async::Write for LpuartTx<'_, Async> {
+    /// Queue the buffer. Cancellation may leave a prefix transmitted or queued.
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.write(buf).await.map(|_| buf.len())
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.flush().await
+    }
+}
+
+impl embedded_io_async::Read for Lpuart<'_, Async> {
+    /// Wait for at least one byte, then return available data. Cancellation consumes no bytes.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.rx.read_some(buf).await
+    }
+}
+
+impl embedded_io_async::Write for Lpuart<'_, Async> {
+    /// Queue the buffer. Cancellation may leave a prefix transmitted or queued.
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        embedded_io_async::Write::write(&mut self.tx, buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.tx.flush().await
     }
 }
 
