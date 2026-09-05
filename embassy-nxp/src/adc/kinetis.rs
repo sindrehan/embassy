@@ -2,6 +2,7 @@
 //!
 //! Conversions are single-ended. The ADC is calibrated when the driver is created, using
 //! 32-sample hardware averaging and an ADC clock at or below 4 MHz.
+//! Asynchronous conversions keep the executor in WAIT until they complete or are cancelled.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -304,6 +305,7 @@ impl<'d, T: InterruptInstance> Adc<'d, T, Async> {
     }
 
     async fn read_channel(&mut self, channel: u8, mux_b: bool) -> u16 {
+        let _wake_guard = crate::power::wake_guard();
         let regs = self.info.regs;
         let state = self.state;
         critical_section::with(|_| {
