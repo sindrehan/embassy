@@ -47,6 +47,7 @@ TESTS = {
     "spi_dma_in_place": Test("isolated"),
     "spi_low_power": Test("isolated"),
     "spi_lifecycle": Test("isolated"),
+    "spi_slow": Test("isolated"),
     "shared_irq": Test("isolated"),
     "gpio": Test("loopback"),
     "spi": Test("loopback"),

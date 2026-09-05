@@ -130,10 +130,9 @@ impl Default for State {
 pub struct Spi<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
-    is_async: bool,
     dma: Option<Dma<'d>>,
     pins: [Option<Flex<'d>>; 3],
-    disable_interrupt: Option<fn()>,
+    irq: Option<Irq>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -142,6 +141,21 @@ struct Dma<'d> {
     tx_request: u8,
     rx: Peri<'d, AnyChannel>,
     rx_request: u8,
+}
+
+#[derive(Clone, Copy)]
+struct Irq {
+    enable: fn(),
+    disable: fn(),
+}
+
+impl Irq {
+    fn new<T: InterruptInstance>() -> Self {
+        Self {
+            enable: enable_interrupt::<T>,
+            disable: disable_interrupt::<T>,
+        }
+    }
 }
 
 /// `DBR`, `PBR`, `BR` for the highest SCK rate not above `frequency`, like the SDK.
@@ -207,9 +221,13 @@ fn halt(regs: Regs) {
     while regs.sr().read().txrxs() {}
 }
 
-fn stop(regs: Regs) {
+fn stop(regs: Regs, irq: Option<Irq>) {
+    if let Some(irq) = irq {
+        (irq.disable)();
+    }
+    // RSER may only change while stopped. Waiting for a frame must not mask timer interrupts.
+    halt(regs);
     critical_section::with(|_| {
-        halt(regs);
         regs.rser().write(|_| {});
         regs.mcr().modify(|w| {
             w.set_clr_txf(true);
@@ -235,7 +253,6 @@ impl<'d> Spi<'d, Blocking> {
             &config,
         );
         Self::new_inner::<T>(
-            false,
             [Some(Flex::new(sck)), Some(Flex::new(mosi)), Some(Flex::new(miso))],
             None,
         )
@@ -249,7 +266,7 @@ impl<'d> Spi<'d, Blocking> {
         config: Config,
     ) -> Self {
         init::<T>((sck.pcr(), sck.alt()), Some((mosi.pcr(), mosi.alt())), None, &config);
-        Self::new_inner::<T>(false, [Some(Flex::new(sck)), Some(Flex::new(mosi)), None], None)
+        Self::new_inner::<T>([Some(Flex::new(sck)), Some(Flex::new(mosi)), None], None)
     }
 
     /// Create a blocking receive-only master (no MOSI pin).
@@ -260,7 +277,7 @@ impl<'d> Spi<'d, Blocking> {
         config: Config,
     ) -> Self {
         init::<T>((sck.pcr(), sck.alt()), None, Some((miso.pcr(), miso.alt())), &config);
-        Self::new_inner::<T>(false, [Some(Flex::new(sck)), None, Some(Flex::new(miso))], None)
+        Self::new_inner::<T>([Some(Flex::new(sck)), None, Some(Flex::new(miso))], None)
     }
 }
 
@@ -282,9 +299,8 @@ impl<'d> Spi<'d, Async> {
         );
         enable_interrupt::<T>();
         Self::new_inner::<T>(
-            true,
             [Some(Flex::new(sck)), Some(Flex::new(mosi)), Some(Flex::new(miso))],
-            Some(disable_interrupt::<T>),
+            Some(Irq::new::<T>()),
         )
     }
 
@@ -299,9 +315,8 @@ impl<'d> Spi<'d, Async> {
         init::<T>((sck.pcr(), sck.alt()), Some((mosi.pcr(), mosi.alt())), None, &config);
         enable_interrupt::<T>();
         Self::new_inner::<T>(
-            true,
             [Some(Flex::new(sck)), Some(Flex::new(mosi)), None],
-            Some(disable_interrupt::<T>),
+            Some(Irq::new::<T>()),
         )
     }
 
@@ -316,9 +331,8 @@ impl<'d> Spi<'d, Async> {
         init::<T>((sck.pcr(), sck.alt()), None, Some((miso.pcr(), miso.alt())), &config);
         enable_interrupt::<T>();
         Self::new_inner::<T>(
-            true,
             [Some(Flex::new(sck)), None, Some(Flex::new(miso))],
-            Some(disable_interrupt::<T>),
+            Some(Irq::new::<T>()),
         )
     }
 
@@ -340,7 +354,6 @@ impl<'d> Spi<'d, Async> {
             &config,
         );
         let mut spi = Self::new_inner::<T>(
-            true,
             [Some(Flex::new(sck)), Some(Flex::new(mosi)), Some(Flex::new(miso))],
             None,
         );
@@ -377,14 +390,13 @@ impl<'d> Spi<'d, Async> {
 }
 
 impl<'d, M: Mode> Spi<'d, M> {
-    fn new_inner<T: Instance>(is_async: bool, pins: [Option<Flex<'d>>; 3], disable_interrupt: Option<fn()>) -> Self {
+    fn new_inner<T: Instance>(pins: [Option<Flex<'d>>; 3], irq: Option<Irq>) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
-            is_async,
             dma: None,
             pins,
-            disable_interrupt,
+            irq,
             _phantom: PhantomData,
         }
     }
@@ -420,19 +432,14 @@ impl<'d, M: Mode> Spi<'d, M> {
     async fn wait_rx(&mut self) {
         let regs = self.info.regs;
         poll_fn(|cx| {
-            critical_section::with(|_| {
-                // RSER may only be changed while stopped (RM 48.4.6).
-                halt(regs);
-                if regs.sr().read().rxctr() != 0 {
-                    return Poll::Ready(());
-                }
-                if self.is_async {
-                    self.state.waker.register(cx.waker());
-                    regs.rser().write(|w| w.set_rfdf_re(true));
-                }
-                regs.mcr().modify(|w| w.set_halt(false));
-                Poll::Pending
-            })
+            self.state.waker.register(cx.waker());
+            if regs.sr().read().rxctr() != 0 {
+                return Poll::Ready(());
+            }
+            if let Some(irq) = self.irq {
+                (irq.enable)();
+            }
+            Poll::Pending
         })
         .await
     }
@@ -446,8 +453,9 @@ impl<'d, M: Mode> Spi<'d, M> {
         }
 
         let _wake_guard = crate::power::wake_guard();
-        stop(regs);
-        let _on_drop = OnDrop::new(move || stop(regs));
+        let irq = self.irq;
+        stop(regs, irq);
+        let _on_drop = OnDrop::new(move || stop(regs, irq));
 
         if self.dma.is_some() {
             let mut outgoing = [0; 64];
@@ -457,6 +465,9 @@ impl<'d, M: Mode> Spi<'d, M> {
             }
             return Ok(());
         }
+
+        regs.rser().write(|w| w.set_rfdf_re(irq.is_some()));
+        regs.mcr().modify(|w| w.set_halt(false));
 
         // Keep the accesses sequenced through the one mutable slice. A received byte cannot
         // overwrite a byte that has not already been queued for transmission.
@@ -527,7 +538,7 @@ impl<'d, M: Mode> Spi<'d, M> {
             w.set_tfff_re(true);
             w.set_tfff_dirs(true);
         });
-        let on_drop = OnDrop::new(move || stop(regs));
+        let on_drop = OnDrop::new(move || stop(regs, None));
         regs.mcr().modify(|w| w.set_halt(false));
         let (rx, tx) = embassy_futures::join::join(rx, tx).await;
         halt(regs);
@@ -553,8 +564,9 @@ impl<'d, M: Mode> Spi<'d, M> {
         }
 
         let _wake_guard = crate::power::wake_guard();
-        stop(regs);
-        let _on_drop = OnDrop::new(move || stop(regs));
+        let irq = self.irq;
+        stop(regs, irq);
+        let _on_drop = OnDrop::new(move || stop(regs, irq));
 
         if self.dma.is_some() {
             let mut offset = 0;
@@ -583,6 +595,8 @@ impl<'d, M: Mode> Spi<'d, M> {
             return Ok(());
         }
 
+        regs.rser().write(|w| w.set_rfdf_re(irq.is_some()));
+        regs.mcr().modify(|w| w.set_halt(false));
         let mut sent = 0;
         let mut received = 0;
         while received < len {
@@ -619,12 +633,9 @@ impl<'d, M: Mode> Spi<'d, M> {
 
 impl<M: Mode> Drop for Spi<'_, M> {
     fn drop(&mut self) {
+        stop(self.info.regs, self.irq);
         critical_section::with(|_| {
-            stop(self.info.regs);
             self.info.regs.mcr().modify(|w| w.set_mdis(true));
-            if let Some(disable) = self.disable_interrupt {
-                disable();
-            }
             for pin in self.pins.iter_mut().flatten() {
                 pin.set_as_disconnected();
             }
@@ -664,10 +675,11 @@ impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> fo
             return;
         }
         let regs = T::info().regs;
-        if regs.rser().read().rfdf_re() && regs.sr().read().rfdf() {
-            // Halt at a frame boundary before changing RSER. The task restarts after draining RX.
-            halt(regs);
-            regs.rser().modify(|w| w.set_rfdf_re(false));
+        let requests = regs.rser().read();
+        if requests.rfdf_re() && !requests.rfdf_dirs() && regs.sr().read().rfdf() {
+            // Mask delivery, not RSER: changing RSER while shifting is forbidden (RM 48.4.6).
+            // The task drains RX and re-enables this source when it needs another wakeup.
+            disable_interrupt::<T>();
             T::state().waker.wake();
         }
     }
