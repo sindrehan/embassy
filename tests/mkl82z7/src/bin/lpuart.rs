@@ -23,6 +23,7 @@ bind_interrupts!(struct Irqs {
 fn loopback() {
     let regs = pac::LPUART0;
     regs.ctrl().modify(|w| w.set_re(false));
+    while regs.ctrl().read().re() {}
     regs.ctrl().modify(|w| {
         w.set_loops(true);
         w.set_rsrc(false);

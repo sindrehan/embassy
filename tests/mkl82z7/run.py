@@ -30,10 +30,12 @@ class Test:
 
 TESTS = {
     "adc": Test("onboard"),
+    "adc_lifecycle": Test("onboard"),
     "i2c": Test("onboard"),
     "intmux": Test("onboard"),
     "lpuart": Test("onboard"),
     "lpuart_dma": Test("onboard"),
+    "lpuart_lifecycle": Test("onboard"),
     "dma_lifecycle": Test("onboard"),
     "adc_low_power": Test("low-power"),
     "vlps_pll": Test("low-power"),
@@ -43,6 +45,7 @@ TESTS = {
     "spis_lifecycle": Test("isolated"),
     "spi_dma_in_place": Test("isolated"),
     "spi_low_power": Test("isolated"),
+    "spi_lifecycle": Test("isolated"),
     "shared_irq": Test("isolated"),
     "gpio": Test("loopback"),
     "spi": Test("loopback"),

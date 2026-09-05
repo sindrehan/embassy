@@ -19,6 +19,7 @@ use embassy_sync::waitqueue::AtomicWaker;
 pub use embedded_hal_1::spi::{Phase, Polarity};
 
 use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
+use crate::gpio::Flex;
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::common::{RW, Reg};
 use crate::pac::port::regs::Pcr;
@@ -100,6 +101,7 @@ impl Default for Config {
 pub struct Info {
     pub(crate) regs: Regs,
     pub(crate) fifo_depth: u8,
+    pub(crate) disable_clock: fn(),
 }
 
 /// Per-instance waker.
@@ -122,11 +124,16 @@ impl Default for State {
 }
 
 /// SPI master driver.
+///
+/// Dropping the driver disables its clock and interrupt source and disconnects its pins.
+/// Reborrow the peripheral and pins at construction to reuse them after dropping the driver.
 pub struct Spi<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
     is_async: bool,
     dma: Option<Dma<'d>>,
+    pins: [Option<Flex<'d>>; 3],
+    disable_interrupt: Option<fn()>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -227,7 +234,11 @@ impl<'d> Spi<'d, Blocking> {
             Some((miso.pcr(), miso.alt())),
             &config,
         );
-        Self::new_inner::<T>(false)
+        Self::new_inner::<T>(
+            false,
+            [Some(Flex::new(sck)), Some(Flex::new(mosi)), Some(Flex::new(miso))],
+            None,
+        )
     }
 
     /// Create a blocking transmit-only master (no MISO pin).
@@ -238,7 +249,7 @@ impl<'d> Spi<'d, Blocking> {
         config: Config,
     ) -> Self {
         init::<T>((sck.pcr(), sck.alt()), Some((mosi.pcr(), mosi.alt())), None, &config);
-        Self::new_inner::<T>(false)
+        Self::new_inner::<T>(false, [Some(Flex::new(sck)), Some(Flex::new(mosi)), None], None)
     }
 
     /// Create a blocking receive-only master (no MOSI pin).
@@ -249,7 +260,7 @@ impl<'d> Spi<'d, Blocking> {
         config: Config,
     ) -> Self {
         init::<T>((sck.pcr(), sck.alt()), None, Some((miso.pcr(), miso.alt())), &config);
-        Self::new_inner::<T>(false)
+        Self::new_inner::<T>(false, [Some(Flex::new(sck)), None, Some(Flex::new(miso))], None)
     }
 }
 
@@ -270,7 +281,11 @@ impl<'d> Spi<'d, Async> {
             &config,
         );
         enable_interrupt::<T>();
-        Self::new_inner::<T>(true)
+        Self::new_inner::<T>(
+            true,
+            [Some(Flex::new(sck)), Some(Flex::new(mosi)), Some(Flex::new(miso))],
+            Some(disable_interrupt::<T>),
+        )
     }
 
     /// Create an async transmit-only master (no MISO pin).
@@ -283,7 +298,11 @@ impl<'d> Spi<'d, Async> {
     ) -> Self {
         init::<T>((sck.pcr(), sck.alt()), Some((mosi.pcr(), mosi.alt())), None, &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>(true)
+        Self::new_inner::<T>(
+            true,
+            [Some(Flex::new(sck)), Some(Flex::new(mosi)), None],
+            Some(disable_interrupt::<T>),
+        )
     }
 
     /// Create an async receive-only master (no MOSI pin).
@@ -296,7 +315,11 @@ impl<'d> Spi<'d, Async> {
     ) -> Self {
         init::<T>((sck.pcr(), sck.alt()), None, Some((miso.pcr(), miso.alt())), &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>(true)
+        Self::new_inner::<T>(
+            true,
+            [Some(Flex::new(sck)), None, Some(Flex::new(miso))],
+            Some(disable_interrupt::<T>),
+        )
     }
 
     /// Create an async full-duplex master whose FIFOs are fed and drained by DMA. No interrupt
@@ -316,7 +339,11 @@ impl<'d> Spi<'d, Async> {
             Some((miso.pcr(), miso.alt())),
             &config,
         );
-        let mut spi = Self::new_inner::<T>(true);
+        let mut spi = Self::new_inner::<T>(
+            true,
+            [Some(Flex::new(sck)), Some(Flex::new(mosi)), Some(Flex::new(miso))],
+            None,
+        );
         spi.dma = Some(Dma {
             tx: tx_dma.into(),
             tx_request: T::TX_DMA_REQUEST,
@@ -350,12 +377,14 @@ impl<'d> Spi<'d, Async> {
 }
 
 impl<'d, M: Mode> Spi<'d, M> {
-    fn new_inner<T: Instance>(is_async: bool) -> Self {
+    fn new_inner<T: Instance>(is_async: bool, pins: [Option<Flex<'d>>; 3], disable_interrupt: Option<fn()>) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
             is_async,
             dma: None,
+            pins,
+            disable_interrupt,
             _phantom: PhantomData,
         }
     }
@@ -588,6 +617,31 @@ impl<'d, M: Mode> Spi<'d, M> {
     }
 }
 
+impl<M: Mode> Drop for Spi<'_, M> {
+    fn drop(&mut self) {
+        critical_section::with(|_| {
+            stop(self.info.regs);
+            self.info.regs.mcr().modify(|w| w.set_mdis(true));
+            if let Some(disable) = self.disable_interrupt {
+                disable();
+            }
+            for pin in self.pins.iter_mut().flatten() {
+                pin.set_as_disconnected();
+            }
+            (self.info.disable_clock)();
+        });
+    }
+}
+
+fn disable_interrupt<T: InterruptInstance>() {
+    if let Some(source) = T::INTMUX_SOURCE {
+        crate::intmux::disable_source(crate::intmux::CHANNEL, source);
+    } else {
+        T::Interrupt::disable();
+        T::Interrupt::unpend();
+    }
+}
+
 fn enable_interrupt<T: InterruptInstance>() {
     if let Some(source) = T::INTMUX_SOURCE {
         crate::intmux::enable_source(crate::intmux::CHANNEL, source);
@@ -606,7 +660,7 @@ impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> fo
     unsafe fn on_interrupt() {
         // On a shared INTMUX line this runs for other peripherals' interrupts too, possibly
         // before this instance exists; its registers bus-fault while the clock gate is closed.
-        if T::INTMUX_SOURCE.is_some() && !T::clock_enabled() {
+        if !T::clock_enabled() {
             return;
         }
         let regs = T::info().regs;
@@ -737,6 +791,7 @@ macro_rules! impl_spi_instance {
                 static INFO: crate::spi::Info = crate::spi::Info {
                     regs: crate::pac::$inst,
                     fifo_depth: $fifo_depth,
+                    disable_clock: crate::clocks::disable::<crate::peripherals::$inst>,
                 };
                 &INFO
             }

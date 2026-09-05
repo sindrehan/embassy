@@ -44,9 +44,9 @@ its wiring; there is no combined group because the fixtures are incompatible.
 
 | Group | Wiring | Checks |
 | --- | --- | --- |
-| `onboard` | Powered, unmodified devkit; PTC10/PTC11 free | ADC calibration/resolution/averaging, I²C sensor transfers and recovery, UART IRQ/DMA internal loopback, DMA wake guards and channel reuse, INTMUX routing |
+| `onboard` | Powered, unmodified devkit; PTB0 and PTC10/PTC11 free | ADC calibration/resolution/averaging and lifecycle, I²C sensor transfers and recovery, UART IRQ/DMA loopback and split-half lifecycle, DMA wake guards and channel reuse, INTMUX routing |
 | `low-power` | No external signals on UART or LED pins | ADC wake guards, PLL restoration, idle sleep modes, LPTMR alarms and full counter wrap |
-| `isolated` | PTC4–PTC7, PTC10/PTC11 and PTD4–PTD7 undriven | SPI slave lifecycle, shared IRQ preservation, DMA-only SPI in-place completion, SPI master wake guard |
+| `isolated` | PTC4–PTC7, PTC10/PTC11 and PTD4–PTD7 undriven | SPI master/slave cancellation and lifecycle, shared IRQ preservation, DMA-only SPI in-place completion, SPI master wake guard |
 | `loopback` | Jumper D11/PTC6 to D12/PTC7; remove other SPI wiring | GPIO waits/cancellation, SPI blocking/IRQ/DMA transfers |
 | `link` | Two boards wired below; no loopback jumper | IRQ and DMA masters, 260 exchanges each, in-place and unequal-length buffers, slave teardown/recreation and VLPS between frames |
 | `low-leakage` | No external wake signals; TPM driver only | LLS3 timeout wake and VLLS3 reset wake |

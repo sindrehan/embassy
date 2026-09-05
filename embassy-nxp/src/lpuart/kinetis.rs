@@ -11,18 +11,26 @@
 //! rates (9600 is safe on the 21 MHz reset clock, 115200 overruns), while with DMA it keeps up.
 //! LPUART2 reaches the NVIC through [INTMUX0](crate::intmux), so its handler is bound to
 //! `INTMUX0_0`.
+//!
+//! Pending async reads and queued transmissions prevent deep sleep. An idle receiver does not:
+//! keep the executor in WAIT if bytes must be received without a pending read. Cancelling a read
+//! discards any bytes already copied to its buffer. Cancelling a write leaves queued bytes to
+//! finish transmitting; deep sleep stays blocked until the final stop bit.
 #![macro_use]
 
+use core::cell::RefCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
+use critical_section::Mutex;
 use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_io::ErrorKind;
 
 use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
+use crate::gpio::Flex;
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::SIM;
 use crate::pac::common::{RW, Reg};
@@ -126,12 +134,19 @@ impl Default for Config {
 /// Per-instance constants.
 pub struct Info {
     pub(crate) regs: Regs,
+    pub(crate) disable_clock: fn(),
 }
 
 /// Per-instance wakers.
 pub struct State {
     tx_waker: AtomicWaker,
     rx_waker: AtomicWaker,
+    resources: Mutex<RefCell<Resources>>,
+}
+
+struct Resources {
+    halves: u8,
+    tx_guard: Option<crate::power::WakeGuard>,
 }
 
 impl State {
@@ -139,6 +154,10 @@ impl State {
         Self {
             tx_waker: AtomicWaker::new(),
             rx_waker: AtomicWaker::new(),
+            resources: Mutex::new(RefCell::new(Resources {
+                halves: 0,
+                tx_guard: None,
+            })),
         }
     }
 }
@@ -150,6 +169,10 @@ impl Default for State {
 }
 
 /// Bidirectional LPUART driver.
+///
+/// Dropping a half disconnects its pin without disabling the other half. The last half dropped
+/// disables the interrupt source and peripheral clock. Teardown waits for the current character;
+/// dropping TX also waits for queued bytes to finish transmitting.
 pub struct Lpuart<'d, M: Mode> {
     tx: LpuartTx<'d, M>,
     rx: LpuartRx<'d, M>,
@@ -160,6 +183,8 @@ pub struct LpuartTx<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
     dma: Option<(Peri<'d, AnyChannel>, u8)>,
+    pin: Flex<'d>,
+    disable_interrupt: Option<fn()>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -168,6 +193,8 @@ pub struct LpuartRx<'d, M: Mode> {
     info: &'static Info,
     state: &'static State,
     dma: Option<(Peri<'d, AnyChannel>, u8)>,
+    pin: Flex<'d>,
+    disable_interrupt: Option<fn()>,
     _phantom: PhantomData<(&'d (), M)>,
 }
 
@@ -216,6 +243,12 @@ fn init<T: Instance>(tx: Option<(Reg<Pcr, RW>, Mux)>, rx: Option<(Reg<Pcr, RW>, 
 
     // Everything off while configuring.
     regs.ctrl().write(|_| {});
+    while regs.ctrl().read().te() || regs.ctrl().read().re() {}
+    critical_section::with(|cs| {
+        let mut resources = T::state().resources.borrow(cs).borrow_mut();
+        resources.halves = u8::from(tx.is_some()) + u8::from(rx.is_some());
+        resources.tx_guard.take();
+    });
 
     regs.baud().write(|w| {
         w.set_osr(osr - 1);
@@ -276,18 +309,32 @@ fn tx_fifo_size(regs: Regs) -> u8 {
 }
 
 impl<'d, M: Mode> LpuartTx<'d, M> {
-    fn new_inner<T: Instance>(dma: Option<(Peri<'d, AnyChannel>, u8)>) -> Self {
+    fn new_inner<T: Instance>(
+        pin: Flex<'d>,
+        disable_interrupt: Option<fn()>,
+        dma: Option<(Peri<'d, AnyChannel>, u8)>,
+    ) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
             dma,
+            pin,
+            disable_interrupt,
             _phantom: PhantomData,
         }
     }
 
     /// Write all bytes, blocking while the FIFO is full.
+    ///
+    /// On a blocking driver, call [`blocking_flush`](Self::blocking_flush) to release the
+    /// transmission's deep-sleep guard once the bytes have left the shift register.
     pub fn blocking_write(&mut self, buffer: &[u8]) -> Result<(), Error> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
         let regs = self.info.regs;
+        let _wake_guard = crate::power::wake_guard();
+        start_write(regs, self.state);
         let size = tx_fifo_size(regs) as usize;
         let mut written = 0;
 
@@ -300,12 +347,17 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
             written += chunk;
         }
 
+        finish_write(regs, self.state, self.disable_interrupt.is_some());
         Ok(())
     }
 
     /// Block until every queued byte has left the shift register.
     pub fn blocking_flush(&mut self) -> Result<(), Error> {
         while !self.info.regs.stat().read().tc() {}
+        critical_section::with(|cs| {
+            self.info.regs.ctrl().modify(|w| w.set_tcie(false));
+            self.state.resources.borrow(cs).borrow_mut().tx_guard.take();
+        });
         Ok(())
     }
 }
@@ -314,7 +366,7 @@ impl<'d> LpuartTx<'d, Blocking> {
     /// Create a transmit-only blocking driver.
     pub fn new_blocking<T: Instance>(_peri: Peri<'d, T>, tx: Peri<'d, impl TxPin<T>>, config: Config) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), None, &config);
-        Self::new_inner::<T>(None)
+        Self::new_inner::<T>(Flex::new(tx), None, None)
     }
 }
 
@@ -328,7 +380,7 @@ impl<'d> LpuartTx<'d, Async> {
     ) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), None, &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>(None)
+        Self::new_inner::<T>(Flex::new(tx), Some(disable_interrupt::<T>), None)
     }
 
     /// Create a transmit-only async driver that moves data with a DMA channel.
@@ -341,27 +393,32 @@ impl<'d> LpuartTx<'d, Async> {
     ) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), None, &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>(Some((tx_dma.into(), T::TX_DMA_REQUEST)))
+        Self::new_inner::<T>(
+            Flex::new(tx),
+            Some(disable_interrupt::<T>),
+            Some((tx_dma.into(), T::TX_DMA_REQUEST)),
+        )
     }
 
     /// Write all bytes: through the DMA channel if one was given, otherwise waiting on the TX
     /// FIFO interrupt while it is full.
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
         let regs = self.info.regs;
+        let state = self.state;
+        let _wake_guard = crate::power::wake_guard();
+        start_write(regs, state);
+        let _on_drop = OnDrop::new(move || finish_write(regs, state, true));
 
         if let Some((channel, request)) = &mut self.dma {
-            if buffer.is_empty() {
-                return Ok(());
-            }
-            regs.baud().modify(|w| w.set_tdmae(true));
-            let on_drop = OnDrop::new(move || regs.baud().modify(|w| w.set_tdmae(false)));
+            critical_section::with(|_| regs.baud().modify(|w| w.set_tdmae(true)));
             for chunk in buffer.chunks(MAX_TRANSFER) {
                 let transfer =
                     unsafe { crate::dma::write(channel.reborrow(), *request, chunk, regs.data().as_ptr() as *mut u8) };
                 transfer.await.map_err(|_| Error::Dma)?;
             }
-            regs.baud().modify(|w| w.set_tdmae(false));
-            on_drop.defuse();
             return Ok(());
         }
 
@@ -397,6 +454,9 @@ impl<'d> LpuartTx<'d, Async> {
     /// Wait until every queued byte has left the shift register.
     pub async fn flush(&mut self) -> Result<(), Error> {
         let regs = self.info.regs;
+        let state = self.state;
+        let _wake_guard = crate::power::wake_guard();
+        let _on_drop = OnDrop::new(move || finish_write(regs, state, true));
         poll_fn(|cx| {
             self.state.tx_waker.register(cx.waker());
             if regs.stat().read().tc() {
@@ -412,11 +472,17 @@ impl<'d> LpuartTx<'d, Async> {
 }
 
 impl<'d, M: Mode> LpuartRx<'d, M> {
-    fn new_inner<T: Instance>(dma: Option<(Peri<'d, AnyChannel>, u8)>) -> Self {
+    fn new_inner<T: Instance>(
+        pin: Flex<'d>,
+        disable_interrupt: Option<fn()>,
+        dma: Option<(Peri<'d, AnyChannel>, u8)>,
+    ) -> Self {
         Self {
             info: T::info(),
             state: T::state(),
             dma,
+            pin,
+            disable_interrupt,
             _phantom: PhantomData,
         }
     }
@@ -475,7 +541,7 @@ impl<'d> LpuartRx<'d, Blocking> {
     /// Create a receive-only blocking driver.
     pub fn new_blocking<T: Instance>(_peri: Peri<'d, T>, rx: Peri<'d, impl RxPin<T>>, config: Config) -> Self {
         init::<T>(None, Some((rx.pcr(), rx.alt())), &config);
-        Self::new_inner::<T>(None)
+        Self::new_inner::<T>(Flex::new(rx), None, None)
     }
 }
 
@@ -489,7 +555,7 @@ impl<'d> LpuartRx<'d, Async> {
     ) -> Self {
         init::<T>(None, Some((rx.pcr(), rx.alt())), &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>(None)
+        Self::new_inner::<T>(Flex::new(rx), Some(disable_interrupt::<T>), None)
     }
 
     /// Create a receive-only async driver that moves data with a DMA channel.
@@ -502,34 +568,38 @@ impl<'d> LpuartRx<'d, Async> {
     ) -> Self {
         init::<T>(None, Some((rx.pcr(), rx.alt())), &config);
         enable_interrupt::<T>();
-        Self::new_inner::<T>(Some((rx_dma.into(), T::RX_DMA_REQUEST)))
+        Self::new_inner::<T>(
+            Flex::new(rx),
+            Some(disable_interrupt::<T>),
+            Some((rx_dma.into(), T::RX_DMA_REQUEST)),
+        )
     }
 
     /// Fill the buffer: through the DMA channel if one was given, otherwise waiting on the RX
     /// interrupt for each byte. With DMA the per-character error flags are not available, so
     /// receive errors are reported from the status register once the buffer is full.
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
         let regs = self.info.regs;
+        let _wake_guard = crate::power::wake_guard();
+        let _on_drop = OnDrop::new(move || stop_read(regs));
 
         if let Some((channel, request)) = &mut self.dma {
-            if buffer.is_empty() {
-                return Ok(());
-            }
             clear_stat(regs, |s| {
                 s.set_or(true);
                 s.set_fe(true);
                 s.set_pf(true);
                 s.set_nf(true);
             });
-            regs.baud().modify(|w| w.set_rdmae(true));
-            let on_drop = OnDrop::new(move || regs.baud().modify(|w| w.set_rdmae(false)));
+            critical_section::with(|_| regs.baud().modify(|w| w.set_rdmae(true)));
             for chunk in buffer.chunks_mut(MAX_TRANSFER) {
                 let transfer =
                     unsafe { crate::dma::read(channel.reborrow(), *request, regs.data().as_ptr() as *const u8, chunk) };
                 transfer.await.map_err(|_| Error::Dma)?;
             }
-            regs.baud().modify(|w| w.set_rdmae(false));
-            on_drop.defuse();
+            stop_read(regs);
             let stat = regs.stat().read();
             let error = if stat.or() {
                 Some(Error::Overrun)
@@ -593,6 +663,97 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
     }
 }
 
+fn start_write(regs: Regs, state: &State) {
+    critical_section::with(|cs| {
+        regs.ctrl().modify(|w| w.set_tcie(false));
+        state
+            .resources
+            .borrow(cs)
+            .borrow_mut()
+            .tx_guard
+            .get_or_insert_with(crate::power::wake_guard);
+    });
+}
+
+fn finish_write(regs: Regs, state: &State, interrupt: bool) {
+    critical_section::with(|cs| {
+        regs.baud().modify(|w| w.set_tdmae(false));
+        let done = regs.stat().read().tc();
+        regs.ctrl().modify(|w| {
+            w.set_tie(false);
+            w.set_tcie(interrupt && !done);
+        });
+        if done {
+            state.resources.borrow(cs).borrow_mut().tx_guard.take();
+        }
+    });
+}
+
+fn stop_read(regs: Regs) {
+    critical_section::with(|_| {
+        regs.baud().modify(|w| w.set_rdmae(false));
+        regs.ctrl().modify(|w| {
+            w.set_rie(false);
+            w.set_orie(false);
+        });
+    });
+}
+
+fn drop_half(info: &Info, state: &State, disable_interrupt: Option<fn()>) {
+    critical_section::with(|cs| {
+        let mut resources = state.resources.borrow(cs).borrow_mut();
+        resources.halves -= 1;
+        if resources.halves == 0 {
+            info.regs.ctrl().write(|_| {});
+            info.regs.baud().modify(|w| {
+                w.set_tdmae(false);
+                w.set_rdmae(false);
+            });
+            if let Some(disable) = disable_interrupt {
+                disable();
+            }
+            (info.disable_clock)();
+        }
+    });
+}
+
+impl<M: Mode> Drop for LpuartTx<'_, M> {
+    fn drop(&mut self) {
+        self.blocking_flush().unwrap();
+        let regs = self.info.regs;
+        critical_section::with(|_| {
+            regs.baud().modify(|w| w.set_tdmae(false));
+            regs.ctrl().modify(|w| {
+                w.set_tie(false);
+                w.set_te(false);
+            });
+        });
+        while regs.ctrl().read().te() {}
+        self.pin.set_as_disconnected();
+        drop_half(self.info, self.state, self.disable_interrupt);
+    }
+}
+
+impl<M: Mode> Drop for LpuartRx<'_, M> {
+    fn drop(&mut self) {
+        let regs = self.info.regs;
+        stop_read(regs);
+        critical_section::with(|_| regs.ctrl().modify(|w| w.set_re(false)));
+        while regs.ctrl().read().re() {}
+        self.pin.set_as_disconnected();
+        drop_half(self.info, self.state, self.disable_interrupt);
+    }
+}
+
+fn disable_interrupt<T: InterruptInstance>() {
+    if let Some(source) = T::INTMUX_SOURCE {
+        crate::intmux::disable_source(crate::intmux::CHANNEL, source);
+    } else {
+        T::Interrupt::disable();
+        T::Interrupt::unpend();
+    }
+}
+
 fn enable_interrupt<T: InterruptInstance>() {
     if let Some(source) = T::INTMUX_SOURCE {
         crate::intmux::enable_source(crate::intmux::CHANNEL, source);
@@ -611,7 +772,7 @@ impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> fo
     unsafe fn on_interrupt() {
         // On a shared INTMUX line this runs for other peripherals' interrupts too, possibly
         // before this instance exists; its registers bus-fault while the clock gate is closed.
-        if T::INTMUX_SOURCE.is_some() && !T::clock_enabled() {
+        if !T::clock_enabled() {
             return;
         }
         let regs = T::info().regs;
@@ -629,10 +790,14 @@ impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> fo
             });
             state.rx_waker.wake();
         }
-        if (ctrl.tie() && stat.tdre()) || (ctrl.tcie() && stat.tc()) {
-            regs.ctrl().modify(|w| {
-                w.set_tie(false);
-                w.set_tcie(false);
+        if ctrl.tie() && stat.tdre() {
+            regs.ctrl().modify(|w| w.set_tie(false));
+            state.tx_waker.wake();
+        }
+        if ctrl.tcie() && stat.tc() {
+            critical_section::with(|cs| {
+                regs.ctrl().modify(|w| w.set_tcie(false));
+                state.resources.borrow(cs).borrow_mut().tx_guard.take();
             });
             state.tx_waker.wake();
         }
@@ -649,8 +814,8 @@ impl<'d> Lpuart<'d, Blocking> {
     ) -> Self {
         init::<T>(Some((tx.pcr(), tx.alt())), Some((rx.pcr(), rx.alt())), &config);
         Self {
-            tx: LpuartTx::new_inner::<T>(None),
-            rx: LpuartRx::new_inner::<T>(None),
+            tx: LpuartTx::new_inner::<T>(Flex::new(tx), None, None),
+            rx: LpuartRx::new_inner::<T>(Flex::new(rx), None, None),
         }
     }
 }
@@ -667,8 +832,8 @@ impl<'d> Lpuart<'d, Async> {
         init::<T>(Some((tx.pcr(), tx.alt())), Some((rx.pcr(), rx.alt())), &config);
         enable_interrupt::<T>();
         Self {
-            tx: LpuartTx::new_inner::<T>(None),
-            rx: LpuartRx::new_inner::<T>(None),
+            tx: LpuartTx::new_inner::<T>(Flex::new(tx), Some(disable_interrupt::<T>), None),
+            rx: LpuartRx::new_inner::<T>(Flex::new(rx), Some(disable_interrupt::<T>), None),
         }
     }
 
@@ -685,8 +850,16 @@ impl<'d> Lpuart<'d, Async> {
         init::<T>(Some((tx.pcr(), tx.alt())), Some((rx.pcr(), rx.alt())), &config);
         enable_interrupt::<T>();
         Self {
-            tx: LpuartTx::new_inner::<T>(Some((tx_dma.into(), T::TX_DMA_REQUEST))),
-            rx: LpuartRx::new_inner::<T>(Some((rx_dma.into(), T::RX_DMA_REQUEST))),
+            tx: LpuartTx::new_inner::<T>(
+                Flex::new(tx),
+                Some(disable_interrupt::<T>),
+                Some((tx_dma.into(), T::TX_DMA_REQUEST)),
+            ),
+            rx: LpuartRx::new_inner::<T>(
+                Flex::new(rx),
+                Some(disable_interrupt::<T>),
+                Some((rx_dma.into(), T::RX_DMA_REQUEST)),
+            ),
         }
     }
 
@@ -830,6 +1003,7 @@ macro_rules! impl_lpuart_instance {
             fn info() -> &'static crate::lpuart::Info {
                 static INFO: crate::lpuart::Info = crate::lpuart::Info {
                     regs: crate::pac::$inst,
+                    disable_clock: crate::clocks::disable::<crate::peripherals::$inst>,
                 };
                 &INFO
             }

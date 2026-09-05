@@ -145,12 +145,16 @@ impl Default for State {
 }
 
 /// ADC driver.
+///
+/// Dropping the driver stops conversions and disables its clock and interrupt. Pins are borrowed
+/// only during reads; they remain in analog mode and may be reconfigured by their owner.
 pub struct Adc<'d, T: Instance, M: Mode> {
     _peri: Peri<'d, T>,
     info: &'static Info,
     state: &'static State,
     resolution: Resolution,
     averaging: Averaging,
+    disable_interrupt: Option<fn()>,
     _mode: core::marker::PhantomData<M>,
 }
 
@@ -237,6 +241,7 @@ fn calibrate(regs: Regs, averaging: Averaging) -> Result<(), Error> {
 
 fn init<T: Instance>(config: Config) -> Result<(), Error> {
     T::enable_clock();
+    let on_error = OnDrop::new(deinit::<T>);
     let regs = T::info().regs;
 
     regs.sc1(0).write(|w| w.set_adch(Adch::_11111));
@@ -249,7 +254,35 @@ fn init<T: Instance>(config: Config) -> Result<(), Error> {
     regs.cfg2().write(|_| {});
     regs.sc2().write(|w| w.set_refsel(Refsel::_00));
 
-    calibrate(regs, config.averaging)
+    calibrate(regs, config.averaging)?;
+    on_error.defuse();
+    Ok(())
+}
+
+fn deinit<T: Instance>() {
+    let regs = T::info().regs;
+    regs.sc1(0).write(|w| w.set_adch(Adch::_11111));
+    regs.sc1(1).write(|w| w.set_adch(Adch::_11111));
+    regs.sc2().write(|_| {});
+    regs.sc3().write(|w| w.set_calf(true));
+    T::state().result.store(NO_RESULT, Ordering::Relaxed);
+    T::disable_clock();
+}
+
+fn disable_interrupt<T: InterruptInstance>() {
+    T::Interrupt::disable();
+    T::Interrupt::unpend();
+}
+
+impl<T: Instance, M: Mode> Drop for Adc<'_, T, M> {
+    fn drop(&mut self) {
+        critical_section::with(|_| {
+            if let Some(disable) = self.disable_interrupt {
+                disable();
+            }
+            deinit::<T>();
+        });
+    }
 }
 
 fn start_conversion(regs: Regs, channel: u8, mux_b: bool, interrupt: bool) {
@@ -279,6 +312,7 @@ impl<'d, T: Instance> Adc<'d, T, Blocking> {
             state: T::state(),
             resolution: config.resolution,
             averaging: config.averaging,
+            disable_interrupt: None,
             _mode: core::marker::PhantomData,
         })
     }
@@ -300,6 +334,7 @@ impl<'d, T: InterruptInstance> Adc<'d, T, Async> {
             state: T::state(),
             resolution: config.resolution,
             averaging: config.averaging,
+            disable_interrupt: Some(disable_interrupt::<T>),
             _mode: core::marker::PhantomData,
         })
     }
@@ -410,6 +445,7 @@ pub(crate) trait SealedInstance {
     fn info() -> &'static Info;
     fn state() -> &'static State;
     fn enable_clock();
+    fn disable_clock();
 }
 
 /// An ADC instance.
@@ -439,6 +475,10 @@ macro_rules! impl_adc_instance {
 
             fn enable_clock() {
                 crate::clocks::enable::<crate::peripherals::$inst>();
+            }
+
+            fn disable_clock() {
+                crate::clocks::disable::<crate::peripherals::$inst>();
             }
         }
 
@@ -476,7 +516,7 @@ macro_rules! impl_adc_gpio_pin {
             }
 
             fn configure_for_adc(&self) {
-                crate::gpio::SealedPin::pcr(self).modify(|w| w.set_mux(crate::pac::port::vals::Mux::Mux0));
+                crate::gpio::SealedPin::pcr(self).write(|w| w.set_isf(true));
             }
         }
 
