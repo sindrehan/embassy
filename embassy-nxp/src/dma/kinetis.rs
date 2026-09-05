@@ -4,6 +4,7 @@
 //! go to any channel, so drivers take any channel and supply their request number. Transfers are
 //! futures completing on the major loop interrupt. The HAL owns the DMA interrupts (channel pairs
 //! share the four `DMAn_DMAn+4` lines, plus `DMA_ERROR`); nothing needs binding by the user.
+//! Active transfers prevent deep sleep until completion or cancellation.
 #![macro_use]
 
 use core::future::Future;
@@ -221,6 +222,7 @@ fn transfer_inner<'a, C: Channel>(
         len > 0 && len <= MAX_TRANSFER,
         "DMA: transfer length must be 1 to 32767 words"
     );
+    let wake_guard = crate::power::wake_guard();
     let n = ch.number() as usize;
     let bytes = 1u16 << size.to_bits();
 
@@ -261,22 +263,37 @@ fn transfer_inner<'a, C: Channel>(
     DMA.serq().write(|w| w.set_serq(n as u8));
     compiler_fence(Ordering::SeqCst);
 
-    Transfer { channel: ch }
+    Transfer {
+        channel: ch,
+        wake_guard: Some(wake_guard),
+    }
 }
 
-/// A running DMA transfer. Dropping it stops the channel.
-#[must_use = "futures do nothing unless you `.await` or poll them"]
+/// A DMA transfer that starts when constructed. Dropping it stops the channel before releasing
+/// its memory and wake guard. Await it to observe completion or errors.
+#[must_use = "dropping the transfer cancels it"]
 pub struct Transfer<'a, C: Channel> {
     channel: Peri<'a, C>,
+    wake_guard: Option<crate::power::WakeGuard>,
 }
 
-impl<'a, C: Channel> Drop for Transfer<'a, C> {
-    fn drop(&mut self) {
+impl<'a, C: Channel> Transfer<'a, C> {
+    fn stop(&mut self) {
         let n = self.channel.number() as usize;
         DMA.cerq().write(|w| w.set_cerq(n as u8));
         DMAMUX.chcfg(n).write(|_| {});
         while DMA.tcd_csr(n).read().active() {}
         compiler_fence(Ordering::SeqCst);
+        DMA.cint().write(|w| w.set_cint(n as u8));
+        DMA.cerr().write(|w| w.set_cerr(n as u8));
+        critical_section::with(|_| ERRORS.store(ERRORS.load(Ordering::Relaxed) & !(1 << n), Ordering::Relaxed));
+        self.wake_guard.take();
+    }
+}
+
+impl<'a, C: Channel> Drop for Transfer<'a, C> {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -285,7 +302,8 @@ impl<'a, C: Channel> Future for Transfer<'a, C> {
     type Output = Result<(), Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let n = self.channel.number() as usize;
+        let this = self.get_mut();
+        let n = this.channel.number() as usize;
         WAKERS[n].register(cx.waker());
 
         let failed = critical_section::with(|_| {
@@ -294,10 +312,11 @@ impl<'a, C: Channel> Future for Transfer<'a, C> {
             errors & (1 << n) != 0
         });
         if failed {
+            this.stop();
             return Poll::Ready(Err(Error::Bus));
         }
         if DMA.tcd_csr(n).read().done() {
-            compiler_fence(Ordering::SeqCst);
+            this.stop();
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending

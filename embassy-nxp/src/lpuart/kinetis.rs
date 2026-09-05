@@ -596,8 +596,9 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
 fn enable_interrupt<T: InterruptInstance>() {
     if let Some(source) = T::INTMUX_SOURCE {
         crate::intmux::enable_source(crate::intmux::CHANNEL, source);
+    } else {
+        T::Interrupt::unpend();
     }
-    T::Interrupt::unpend();
     unsafe { T::Interrupt::enable() };
 }
 

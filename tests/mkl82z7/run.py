@@ -34,6 +34,7 @@ TESTS = {
     "intmux": Test("onboard"),
     "lpuart": Test("onboard"),
     "lpuart_dma": Test("onboard"),
+    "dma_lifecycle": Test("onboard"),
     "adc_low_power": Test("low-power"),
     "vlps_pll": Test("low-power"),
     "sleep_modes": Test("low-power", 25),
@@ -42,10 +43,14 @@ TESTS = {
     "spis_lifecycle": Test("isolated"),
     "spi_dma_in_place": Test("isolated"),
     "spi_low_power": Test("isolated"),
+    "shared_irq": Test("isolated"),
     "gpio": Test("loopback"),
     "spi": Test("loopback"),
     "spi_link_master": Test("link", 25),
+    "spi_link_dma": Test("link", 40),
 }
+
+LINK_TESTS = {"spi_link_master", "spi_link_dma"}
 
 
 def probe_selector(value):
@@ -315,7 +320,7 @@ def main():
     if (
         not args.park
         and any(
-            name == "spi_link_master" for _, tests in selections for name, _ in tests
+            name in LINK_TESTS for _, tests in selections for name, _ in tests
         )
         and not args.peer_probe
     ):
@@ -360,7 +365,7 @@ def main():
                 started = time.monotonic()
                 result = {"driver": driver, "test": name, "status": "FAIL"}
                 try:
-                    if name == "spi_link_master":
+                    if name in LINK_TESTS:
                         program(
                             args,
                             args.probe,
@@ -385,7 +390,7 @@ def main():
                     result["error"] = "interrupted"
                     raise
                 finally:
-                    if name == "spi_link_master":
+                    if name in LINK_TESTS:
                         for label, probe in [
                             ("master", args.probe),
                             ("peer", args.peer_probe),

@@ -5,6 +5,8 @@
 //! FIFO and SPI1 a single entry. With two DMA channels ([`Spi::new_with_dma`]) the FIFOs can be fed
 //! and drained by DMA. SPI1 reaches the NVIC through [INTMUX0](crate::intmux), so its handler is
 //! bound to `INTMUX0_0`.
+//! Transfers prevent deep sleep. Cancellation stops at the end of the current frame, disables
+//! requests and clears both FIFOs; subsequent transfers start with empty FIFOs.
 #![macro_use]
 
 use core::future::poll_fn;
@@ -190,7 +192,24 @@ fn init<T: Instance>(
     }
 
     regs.sr().write_value(Sr(SR_W1C));
-    regs.mcr().modify(|w| w.set_halt(false));
+    regs.rser().write(|_| {});
+}
+
+fn halt(regs: Regs) {
+    regs.mcr().modify(|w| w.set_halt(true));
+    while regs.sr().read().txrxs() {}
+}
+
+fn stop(regs: Regs) {
+    critical_section::with(|_| {
+        halt(regs);
+        regs.rser().write(|_| {});
+        regs.mcr().modify(|w| {
+            w.set_clr_txf(true);
+            w.set_clr_rxf(true);
+        });
+        regs.sr().write_value(Sr(SR_W1C));
+    });
 }
 
 impl<'d> Spi<'d, Blocking> {
@@ -313,7 +332,8 @@ impl<'d> Spi<'d, Async> {
         self.transfer_inner(read, write).await
     }
 
-    /// Clock `data` out, replacing it with what comes in.
+    /// Clock `data` out, replacing it with what comes in. The DMA driver copies outgoing data
+    /// into a fixed-size staging buffer so DMA never reads and writes overlapping buffers.
     pub async fn transfer_in_place(&mut self, data: &mut [u8]) -> Result<(), Error> {
         self.transfer_in_place_inner(data).await
     }
@@ -371,16 +391,19 @@ impl<'d, M: Mode> Spi<'d, M> {
     async fn wait_rx(&mut self) {
         let regs = self.info.regs;
         poll_fn(|cx| {
-            if regs.sr().read().rxctr() != 0 {
-                return Poll::Ready(());
-            }
-            if self.is_async {
-                self.state.waker.register(cx.waker());
-                // RFDF is level sensitive (receive FIFO not empty), so a frame that landed
-                // between the check and this write still raises the interrupt.
-                critical_section::with(|_| regs.rser().modify(|w| w.set_rfdf_re(true)));
-            }
-            Poll::Pending
+            critical_section::with(|_| {
+                // RSER may only be changed while stopped (RM 48.4.6).
+                halt(regs);
+                if regs.sr().read().rxctr() != 0 {
+                    return Poll::Ready(());
+                }
+                if self.is_async {
+                    self.state.waker.register(cx.waker());
+                    regs.rser().write(|w| w.set_rfdf_re(true));
+                }
+                regs.mcr().modify(|w| w.set_halt(false));
+                Poll::Pending
+            })
         })
         .await
     }
@@ -393,11 +416,18 @@ impl<'d, M: Mode> Spi<'d, M> {
             return Ok(());
         }
 
-        regs.mcr().modify(|w| {
-            w.set_clr_txf(true);
-            w.set_clr_rxf(true);
-        });
-        regs.sr().write_value(Sr(SR_W1C));
+        let _wake_guard = crate::power::wake_guard();
+        stop(regs);
+        let _on_drop = OnDrop::new(move || stop(regs));
+
+        if self.dma.is_some() {
+            let mut outgoing = [0; 64];
+            for chunk in data.chunks_mut(outgoing.len()) {
+                outgoing[..chunk.len()].copy_from_slice(chunk);
+                self.transfer_dma(chunk, &outgoing[..chunk.len()], chunk.len()).await?;
+            }
+            return Ok(());
+        }
 
         // Keep the accesses sequenced through the one mutable slice. A received byte cannot
         // overwrite a byte that has not already been queued for transmission.
@@ -436,6 +466,7 @@ impl<'d, M: Mode> Spi<'d, M> {
     async fn transfer_dma(&mut self, read: &mut [u8], write: &[u8], len: usize) -> Result<(), Error> {
         let regs = self.info.regs;
         let dma = self.dma.as_mut().unwrap();
+        halt(regs);
 
         // The command half of PUSHR (PCS, CTAS, CONT: all zero) persists across byte writes to
         // its data half, which is what the DMA does.
@@ -467,8 +498,10 @@ impl<'d, M: Mode> Spi<'d, M> {
             w.set_tfff_re(true);
             w.set_tfff_dirs(true);
         });
-        let on_drop = OnDrop::new(move || regs.rser().write(|_| {}));
+        let on_drop = OnDrop::new(move || stop(regs));
+        regs.mcr().modify(|w| w.set_halt(false));
         let (rx, tx) = embassy_futures::join::join(rx, tx).await;
+        halt(regs);
         regs.rser().write(|_| {});
         on_drop.defuse();
 
@@ -490,11 +523,9 @@ impl<'d, M: Mode> Spi<'d, M> {
             return Ok(());
         }
 
-        regs.mcr().modify(|w| {
-            w.set_clr_txf(true);
-            w.set_clr_rxf(true);
-        });
-        regs.sr().write_value(Sr(SR_W1C));
+        let _wake_guard = crate::power::wake_guard();
+        stop(regs);
+        let _on_drop = OnDrop::new(move || stop(regs));
 
         if self.dma.is_some() {
             let mut offset = 0;
@@ -560,8 +591,9 @@ impl<'d, M: Mode> Spi<'d, M> {
 fn enable_interrupt<T: InterruptInstance>() {
     if let Some(source) = T::INTMUX_SOURCE {
         crate::intmux::enable_source(crate::intmux::CHANNEL, source);
+    } else {
+        T::Interrupt::unpend();
     }
-    T::Interrupt::unpend();
     unsafe { T::Interrupt::enable() };
 }
 
@@ -579,7 +611,8 @@ impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> fo
         }
         let regs = T::info().regs;
         if regs.rser().read().rfdf_re() && regs.sr().read().rfdf() {
-            // The thread side only touches RSER inside a critical section, so this cannot race.
+            // Halt at a frame boundary before changing RSER. The task restarts after draining RX.
+            halt(regs);
             regs.rser().modify(|w| w.set_rfdf_re(false));
             T::state().waker.wake();
         }

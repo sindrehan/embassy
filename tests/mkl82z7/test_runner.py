@@ -119,12 +119,11 @@ class ExecutionTests(unittest.TestCase):
         )
         self.assertLess(script.index("quit 1"), script.index('printf "HIL PASS\\n"'))
 
-    def check_link_cleanup(self, error, exit_code, status):
+    def check_link_cleanup(self, error, exit_code, status, name="spi_link_master"):
         with tempfile.TemporaryDirectory() as folder:
             argv = [
                 "run.py",
-                "--group",
-                "link",
+                name,
                 "--time-driver",
                 "tpm",
                 "--probe",
@@ -134,7 +133,7 @@ class ExecutionTests(unittest.TestCase):
             ]
             artifacts = {
                 name: Path(name)
-                for name in ["park", "spi_link_master", "spi_link_slave"]
+                for name in ["park", "spi_link_master", "spi_link_dma", "spi_link_slave"]
             }
             with (
                 patch.object(sys, "argv", argv),
@@ -163,6 +162,9 @@ class ExecutionTests(unittest.TestCase):
 
     def test_link_success_parks_both_boards(self):
         self.check_link_cleanup(None, 0, "PASS")
+
+    def test_dma_link_success_parks_both_boards(self):
+        self.check_link_cleanup(None, 0, "PASS", "spi_link_dma")
 
     def test_interrupted_link_parks_both_boards_and_reports(self):
         report = self.check_link_cleanup(KeyboardInterrupt(), 130, "FAIL")
