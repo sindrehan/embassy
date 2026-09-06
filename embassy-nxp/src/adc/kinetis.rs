@@ -501,6 +501,11 @@ pub(crate) trait SealedAdcPin<T: Instance>: PeripheralType {
 }
 
 /// A pin that can be sampled by an ADC instance.
+///
+/// Includes dedicated analog pins as well as GPIO-backed inputs. On MKL82, use
+/// `peripherals::VREF_OUT` for ADC0_SE22 and `peripherals::DAC0_OUT` for ADC0_SE23.
+/// Dedicated inputs use the same calibrated, cancellation-safe conversion path as GPIO pins;
+/// they do not require a pin-mux change. Disable any other analog function sharing the input.
 #[allow(private_bounds)]
 pub trait AdcPin<T: Instance>: SealedAdcPin<T> + PeripheralType {}
 

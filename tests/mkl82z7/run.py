@@ -31,6 +31,7 @@ class Test:
 TESTS = {
     "adc": Test("onboard"),
     "adc_lifecycle": Test("onboard"),
+    "adc_dedicated": Test("onboard"),
     "i2c": Test("onboard"),
     "intmux": Test("onboard"),
     "lpuart": Test("onboard"),
