@@ -38,6 +38,8 @@ TESTS = {
     "lpuart_dma": Test("onboard"),
     "lpuart_lifecycle": Test("onboard"),
     "lpuart_traits": Test("onboard"),
+    "lpuart_suspend": Test("onboard"),
+    "lpuart_buffered": Test("onboard"),
     "dma_lifecycle": Test("onboard"),
     "adc_low_power": Test("low-power"),
     "vlps_pll": Test("low-power"),

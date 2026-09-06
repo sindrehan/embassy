@@ -20,6 +20,10 @@
 //! The `embedded-io-async` traits work on the driver and its split halves. Trait reads return
 //! available bytes without filling the buffer and are cancellation-safe. They use interrupts
 //! even on DMA drivers; use the inherent `read` for DMA reception of a known-length frame.
+//!
+//! [`LpuartRx::into_buffered`] keeps receiving into a static ring while application tasks run.
+//! Suspend RX and TX before powering down a connected device: suspension retains ownership,
+//! drains TX and disconnects the pins. Resume discards stale receive data before reconnecting.
 #![macro_use]
 
 use core::cell::RefCell;
@@ -34,7 +38,7 @@ use embassy_sync::waitqueue::AtomicWaker;
 use embedded_io::ErrorKind;
 
 use crate::dma::{AnyChannel, Channel, MAX_TRANSFER};
-use crate::gpio::Flex;
+use crate::gpio::{Flex, SealedPin};
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::SIM;
 use crate::pac::common::{RW, Reg};
@@ -44,6 +48,10 @@ use crate::pac::port::regs::Pcr;
 use crate::pac::port::vals::Mux;
 use crate::{Async, Blocking, Mode};
 
+#[path = "buffered.rs"]
+mod buffered;
+pub use buffered::BufferedLpuartRx;
+
 /// Write-1-to-clear flags in STAT: LBKDIF, RXEDGIF, IDLE, OR, NF, FE, PF, MA1F, MA2F.
 const STAT_W1C: u32 = 0xC01F_C000;
 
@@ -52,7 +60,7 @@ const STAT_W1C: u32 = 0xC01F_C000;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub enum Error {
-    /// The receive FIFO overflowed and data was lost.
+    /// The receive FIFO or software buffer overflowed and data was lost.
     Overrun,
     /// The received character's parity did not match the configuration.
     Parity,
@@ -62,6 +70,8 @@ pub enum Error {
     Noise,
     /// The DMA controller reported an error moving the data.
     Dma,
+    /// This half is suspended. Call `resume` before transferring data.
+    Suspended,
 }
 
 impl embedded_io::Error for Error {
@@ -72,6 +82,7 @@ impl embedded_io::Error for Error {
             Error::Framing => ErrorKind::InvalidData,
             Error::Noise => ErrorKind::Other,
             Error::Dma => ErrorKind::Other,
+            Error::Suspended => ErrorKind::Other,
         }
     }
 }
@@ -151,6 +162,7 @@ pub struct State {
 struct Resources {
     halves: u8,
     tx_guard: Option<crate::power::WakeGuard>,
+    rx_buffer: Option<buffered::RxBuffer>,
 }
 
 impl State {
@@ -161,6 +173,7 @@ impl State {
             resources: Mutex::new(RefCell::new(Resources {
                 halves: 0,
                 tx_guard: None,
+                rx_buffer: None,
             })),
         }
     }
@@ -188,6 +201,8 @@ pub struct LpuartTx<'d, M: Mode> {
     state: &'static State,
     dma: Option<(Peri<'d, AnyChannel>, u8)>,
     pin: Flex<'d>,
+    mux: Mux,
+    suspended: bool,
     disable_interrupt: Option<fn()>,
     _phantom: PhantomData<(&'d (), M)>,
 }
@@ -198,6 +213,8 @@ pub struct LpuartRx<'d, M: Mode> {
     state: &'static State,
     dma: Option<(Peri<'d, AnyChannel>, u8)>,
     pin: Flex<'d>,
+    mux: Mux,
+    suspended: bool,
     disable_interrupt: Option<fn()>,
     pending_error: Option<Error>,
     _phantom: PhantomData<(&'d (), M)>,
@@ -253,6 +270,7 @@ fn init<T: Instance>(tx: Option<(Reg<Pcr, RW>, Mux)>, rx: Option<(Reg<Pcr, RW>, 
         let mut resources = T::state().resources.borrow(cs).borrow_mut();
         resources.halves = u8::from(tx.is_some()) + u8::from(rx.is_some());
         resources.tx_guard.take();
+        resources.rx_buffer.take();
     });
 
     regs.baud().write(|w| {
@@ -323,6 +341,8 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
             info: T::info(),
             state: T::state(),
             dma,
+            mux: pin.pin.pcr().read().mux(),
+            suspended: false,
             pin,
             disable_interrupt,
             _phantom: PhantomData,
@@ -336,6 +356,9 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
     pub fn blocking_write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         if buffer.is_empty() {
             return Ok(());
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
         }
         let regs = self.info.regs;
         let _wake_guard = crate::power::wake_guard();
@@ -358,12 +381,44 @@ impl<'d, M: Mode> LpuartTx<'d, M> {
 
     /// Block until every queued byte has left the shift register.
     pub fn blocking_flush(&mut self) -> Result<(), Error> {
+        if self.suspended {
+            return Ok(());
+        }
         while !self.info.regs.stat().read().tc() {}
         critical_section::with(|cs| {
             self.info.regs.ctrl().modify(|w| w.set_tcie(false));
             self.state.resources.borrow(cs).borrow_mut().tx_guard.take();
         });
         Ok(())
+    }
+
+    /// Drain queued bytes, disable the transmitter and disconnect its pin and pulls.
+    /// Peripheral and pin ownership are retained. Calling this again has no effect.
+    pub fn blocking_suspend(&mut self) {
+        if self.suspended {
+            return;
+        }
+        self.blocking_flush().unwrap();
+        critical_section::with(|_| self.info.regs.ctrl().modify(|w| w.set_te(false)));
+        while self.info.regs.ctrl().read().te() {}
+        self.pin.set_as_disconnected();
+        self.suspended = true;
+    }
+
+    /// Reconnect the pin and enable the transmitter. Does nothing unless suspended.
+    pub fn resume(&mut self) {
+        if self.suspended {
+            critical_section::with(|_| {
+                self.info.regs.ctrl().modify(|w| w.set_te(true));
+                self.pin.pin.pcr().modify(|w| w.set_mux(self.mux));
+            });
+            self.suspended = false;
+        }
+    }
+
+    /// Whether the transmitter and its pin are disconnected.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
     }
 }
 
@@ -410,6 +465,9 @@ impl<'d> LpuartTx<'d, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         if buffer.is_empty() {
             return Ok(());
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
         }
         let regs = self.info.regs;
         let state = self.state;
@@ -458,6 +516,9 @@ impl<'d> LpuartTx<'d, Async> {
 
     /// Wait until every queued byte has left the shift register.
     pub async fn flush(&mut self) -> Result<(), Error> {
+        if self.suspended {
+            return Ok(());
+        }
         let regs = self.info.regs;
         let state = self.state;
         let _wake_guard = crate::power::wake_guard();
@@ -474,6 +535,13 @@ impl<'d> LpuartTx<'d, Async> {
         .await;
         Ok(())
     }
+
+    /// Drain queued bytes asynchronously, then disconnect TX. Cancelling while waiting leaves
+    /// TX enabled; queued bytes still finish transmitting.
+    pub async fn suspend(&mut self) {
+        self.flush().await.unwrap();
+        self.blocking_suspend();
+    }
 }
 
 impl<'d, M: Mode> LpuartRx<'d, M> {
@@ -486,6 +554,8 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
             info: T::info(),
             state: T::state(),
             dma,
+            mux: pin.pin.pcr().read().mux(),
+            suspended: false,
             pin,
             disable_interrupt,
             pending_error: None,
@@ -495,6 +565,9 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
 
     /// One byte from the FIFO if there is one, or a pending error.
     fn try_read_byte(&mut self) -> Option<Result<u8, Error>> {
+        if self.suspended {
+            return Some(Err(Error::Suspended));
+        }
         if let Some(error) = self.pending_error.take() {
             return Some(Err(error));
         }
@@ -564,6 +637,41 @@ impl<'d, M: Mode> LpuartRx<'d, M> {
         }
         Ok(())
     }
+
+    /// Disable reception and disconnect RX and its pulls, retaining ownership.
+    ///
+    /// Drop any pending read future first. Its cancellation stops DMA and interrupt requests.
+    /// This call may wait for the current character to finish. Unread data is discarded.
+    pub fn suspend(&mut self) {
+        if self.suspended {
+            return;
+        }
+        stop_read(self.info.regs);
+        critical_section::with(|_| self.info.regs.ctrl().modify(|w| w.set_re(false)));
+        while self.info.regs.ctrl().read().re() {}
+        self.pin.set_as_disconnected();
+        self.pending_error = None;
+        self.suspended = true;
+    }
+
+    /// Discard stale data/errors, reconnect RX and enable reception.
+    /// Does nothing unless suspended.
+    pub fn resume(&mut self) {
+        if self.suspended {
+            critical_section::with(|_| {
+                discard_rx(self.info.regs);
+                self.pin.pin.pcr().modify(|w| w.set_mux(self.mux));
+                self.info.regs.ctrl().modify(|w| w.set_re(true));
+            });
+            self.pending_error = None;
+            self.suspended = false;
+        }
+    }
+
+    /// Whether the receiver and its pin are disconnected.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
 }
 
 impl<'d> LpuartRx<'d, Blocking> {
@@ -610,6 +718,9 @@ impl<'d> LpuartRx<'d, Async> {
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         if buffer.is_empty() {
             return Ok(());
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
         }
         if let Some(error) = self.pending_error.take() {
             return Err(error);
@@ -756,6 +867,17 @@ fn stop_read(regs: Regs) {
     });
 }
 
+fn discard_rx(regs: Regs) {
+    regs.fifo().modify(|w| w.set_rxflush(true));
+    clear_stat(regs, |s| {
+        s.set_or(true);
+        s.set_fe(true);
+        s.set_pf(true);
+        s.set_nf(true);
+        s.set_idle(true);
+    });
+}
+
 fn drop_half(info: &Info, state: &State, disable_interrupt: Option<fn()>) {
     critical_section::with(|cs| {
         let mut resources = state.resources.borrow(cs).borrow_mut();
@@ -840,7 +962,9 @@ impl<T: InterruptInstance> crate::interrupt::typelevel::Handler<T::Interrupt> fo
         // Every enable is masked again here; the waiting task re-arms what it still needs. The
         // thread side only modifies CTRL inside a critical section, so this read-modify-write
         // cannot race with it.
-        if (ctrl.rie() && stat.rdrf()) || (ctrl.orie() && stat.or()) {
+        if buffered::on_interrupt(regs, state) {
+            // Buffered RX drains the FIFO without waiting for the executor.
+        } else if (ctrl.rie() && stat.rdrf()) || (ctrl.orie() && stat.or()) {
             regs.ctrl().modify(|w| {
                 w.set_rie(false);
                 w.set_orie(false);
@@ -934,9 +1058,33 @@ impl<'d> Lpuart<'d, Async> {
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         self.rx.read(buffer).await
     }
+
+    /// Drain TX, then disconnect both pins. Drop any pending transfer futures first.
+    /// Cancellation while draining TX leaves both halves enabled.
+    pub async fn suspend(&mut self) {
+        self.tx.suspend().await;
+        self.rx.suspend();
+    }
 }
 
 impl<'d, M: Mode> Lpuart<'d, M> {
+    /// Drain TX and disconnect both pins, retaining ownership and configuration.
+    pub fn blocking_suspend(&mut self) {
+        self.tx.blocking_suspend();
+        self.rx.suspend();
+    }
+
+    /// Reconnect both pins, discarding stale RX data and errors.
+    pub fn resume(&mut self) {
+        self.rx.resume();
+        self.tx.resume();
+    }
+
+    /// Whether both halves are suspended.
+    pub fn is_suspended(&self) -> bool {
+        self.tx.is_suspended() && self.rx.is_suspended()
+    }
+
     /// See [`LpuartTx::blocking_write`].
     pub fn blocking_write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         self.tx.blocking_write(buffer)

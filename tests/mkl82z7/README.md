@@ -44,7 +44,7 @@ its wiring; there is no combined group because the fixtures are incompatible.
 
 | Group | Wiring | Checks |
 | --- | --- | --- |
-| `onboard` | Powered, unmodified devkit; PTB0 and PTC10/PTC11 free | ADC calibration/resolution/averaging and lifecycle, I²C transfers/recovery, UART IRQ/DMA loopback, split-half lifecycle and async I/O traits, DMA guards/reuse, INTMUX routing |
+| `onboard` | Powered, unmodified devkit; PTB0 and PTC10/PTC11 free | ADC calibration/resolution/averaging, dedicated SE22 input and lifecycle, I²C transfers/recovery, UART IRQ/DMA loopback, buffered RX/errors, pin suspension, split-half lifecycle and async I/O traits, DMA guards/reuse, INTMUX routing |
 | `low-power` | No external signals on UART or LED pins | ADC wake guards, PLL restoration, idle sleep modes, LPTMR alarms and full counter wrap |
 | `isolated` | PTC4–PTC7, PTC10/PTC11 and PTD4–PTD7 undriven | SPI master/slave cancellation and lifecycle, shared IRQ preservation, DMA-only SPI in-place completion, wake guards and slow-frame interrupt latency |
 | `loopback` | Jumper D11/PTC6 to D12/PTC7; remove other SPI wiring | GPIO waits/cancellation, SPI blocking/IRQ/DMA transfers |
