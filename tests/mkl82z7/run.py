@@ -1,11 +1,12 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["pyserial>=3.5,<4"]
 # ///
-"""Run FRDM-KL82Z hardware tests with probe-rs flashing and J-Link/GDB verdicts."""
+"""Run FRDM-KL82Z hardware tests with explicit probes and GDB or UART verdicts."""
 
 import argparse
+import binascii
 import json
 import os
 import shutil
@@ -26,6 +27,7 @@ class Test:
     group: str
     timeout: int = 10
     drivers: tuple[str, ...] = ("tpm", "lptmr")
+    serial: bool = False
 
 
 TESTS = {
@@ -42,6 +44,9 @@ TESTS = {
     "lpuart_buffered": Test("onboard"),
     "dma_lifecycle": Test("onboard"),
     "adc_low_power": Test("low-power"),
+    "watchdog": Test("serial", serial=True),
+    "watchdog_reset": Test("serial", serial=True),
+    "rom_bootloader": Test("serial", serial=True),
     "vlps_pll": Test("low-power"),
     "sleep_modes": Test("low-power", 25),
     "lptmr_time": Test("low-power", 90, ("lptmr",)),
@@ -184,13 +189,13 @@ def program(args, probe, binary, prefix, start=False):
         )
 
 
-def gdb_commands(port):
+def gdb_commands(port, reset=True):
     return [
         "set confirm off",
         "set pagination off",
         "set remotetimeout 5",
         f"target remote 127.0.0.1:{port}",
-        "monitor reset",
+        *(["monitor reset"] if reset else []),
         "set language c",
         "hbreak *((unsigned long)&hil_test_passed & 0xfffffffe)",
         "hbreak HardFault",
@@ -206,7 +211,7 @@ def gdb_commands(port):
     ]
 
 
-def run_gdb(args, binary, timeout, prefix):
+def gdb_server(args):
     serial = str(int(args.probe.split(":")[2]))
     argv = [
         args.jlink,
@@ -235,9 +240,27 @@ def run_gdb(args, binary, timeout, prefix):
         "-RTTTelnetPort",
         str(args.port + 3),
     ]
-    server_log = prefix.with_suffix(".jlink.log")
+    ready_message = "Waiting for GDB connection"
+    if args.debug_server == "probe-rs":
+        argv = [
+            args.probe_rs,
+            "gdb",
+            *probe_args(args, args.probe),
+            "--reset-halt",
+            "--gdb-connection-string",
+            f"127.0.0.1:{args.port}",
+        ]
+        ready_message = "Firing up GDB stub"
+    return argv, ready_message
+
+
+def run_gdb(args, binary, timeout, prefix):
+    argv, ready_message = gdb_server(args)
+    server_log = prefix.with_suffix(".server.log")
     script = prefix.with_suffix(".gdb")
-    script.write_text("\n".join(gdb_commands(args.port)) + "\n")
+    script.write_text(
+        "\n".join(gdb_commands(args.port, args.debug_server == "jlink")) + "\n"
+    )
     with server_log.open("w") as output:
         server = subprocess.Popen(
             argv, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
@@ -245,9 +268,11 @@ def run_gdb(args, binary, timeout, prefix):
         try:
             deadline = time.monotonic() + 12
             # Do not probe the TCP socket: closing that connection terminates a single-run server.
-            while "Waiting for GDB connection" not in server_log.read_text():
+            while ready_message not in server_log.read_text():
                 if server.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError(f"J-Link did not become ready; see {server_log}")
+                    raise RuntimeError(
+                        f"debug server did not become ready; see {server_log}"
+                    )
                 time.sleep(0.05)
             result = command(
                 [args.gdb, "-nx", "-q", "-batch", str(binary), "-x", str(script)],
@@ -262,6 +287,67 @@ def run_gdb(args, binary, timeout, prefix):
                 server.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 stop_process(server)
+
+
+def valid_ping(packet):
+    return (
+        len(packet) == 10
+        and packet[:2] == b"\x5a\xa7"
+        and packet[5] == ord("P")
+        and binascii.crc_hqx(packet[:8], 0) == int.from_bytes(packet[8:], "little")
+    )
+
+
+def run_serial(args, name, binary, timeout, prefix):
+    import serial
+
+    with serial.Serial(
+        args.serial, 115200, timeout=0.1, write_timeout=1, exclusive=True
+    ) as uart:
+        uart.reset_input_buffer()
+        program(args, args.probe, binary, prefix)
+        uart.reset_input_buffer()
+        command(
+            [args.probe_rs, "reset", *probe_args(args, args.probe)],
+            prefix.with_suffix(".reset.log"),
+            15,
+        )
+        deadline = time.monotonic() + timeout
+        received = bytearray()
+        entered_rom = False
+        armed_at = None
+        with prefix.with_suffix(".serial.log").open("wb") as log:
+            while time.monotonic() < deadline:
+                data = uart.read(256)
+                received.extend(data)
+                del received[:-4096]
+                log.write(data)
+                log.flush()
+                if name == "rom_bootloader":
+                    entered_rom |= b"ROM entry\r\n" in received
+                    if entered_rom:
+                        for offset in range(len(received) - 9):
+                            if valid_ping(received[offset : offset + 10]):
+                                return
+                        uart.write(b"\x5a\xa6")
+                elif name == "watchdog_reset":
+                    if armed_at is None and b"WDOG ARMED\r\n" in received:
+                        armed_at = time.monotonic()
+                    if b"WDOG RESET OK\r\n" in received:
+                        if armed_at is None:
+                            raise RuntimeError("watchdog reset arrived without arming")
+                        elapsed = time.monotonic() - armed_at
+                        if not 0.2 <= elapsed <= 2:
+                            raise RuntimeError(
+                                f"unexpected watchdog reset delay: {elapsed:.3f}s"
+                            )
+                        log.write(f"Reset observed after {elapsed:.3f}s\n".encode())
+                        return
+                elif b"WATCHDOG OK\r\n" in received:
+                    return
+            raise RuntimeError(
+                f"UART completion timed out; see {prefix.with_suffix('.serial.log')}"
+            )
 
 
 def main():
@@ -296,9 +382,15 @@ def main():
     parser.add_argument(
         "--vlpr",
         action="store_true",
-        help="run sleep_modes with the VLPR clock configuration",
+        help="run sleep_modes and watchdog with the VLPR clock configuration",
     )
     parser.add_argument("--probe-rs", default="probe-rs")
+    parser.add_argument(
+        "--serial", help="UART device connected to PTB16/PTB17 (115200 baud)"
+    )
+    parser.add_argument(
+        "--debug-server", choices=["jlink", "probe-rs"], default="jlink"
+    )
     parser.add_argument("--jlink", default="JLinkGDBServerCLExe")
     parser.add_argument("--gdb", default="arm-none-eabi-gdb")
     parser.add_argument("--port", type=int, default=2331)
@@ -327,9 +419,15 @@ def main():
         parser.error("no tests match this time driver")
     if (
         not args.park
-        and any(
-            name in LINK_TESTS for _, tests in selections for name, _ in tests
+        and not args.serial
+        and any(test.serial for _, tests in selections for _, test in tests)
+    ):
+        parser.error(
+            "serial tests require --serial; use the UART on the selected target"
         )
+    if (
+        not args.park
+        and any(name in LINK_TESTS for _, tests in selections for name, _ in tests)
         and not args.peer_probe
     ):
         parser.error("the link test requires --peer-probe for the slave")
@@ -388,8 +486,11 @@ def main():
                             folder / "slave",
                             start=True,
                         )
-                    program(args, args.probe, artifacts[name], prefix)
-                    run_gdb(args, artifacts[name], test.timeout, prefix)
+                    if test.serial:
+                        run_serial(args, name, artifacts[name], test.timeout, prefix)
+                    else:
+                        program(args, args.probe, artifacts[name], prefix)
+                        run_gdb(args, artifacts[name], test.timeout, prefix)
                     result["status"] = "PASS"
                 except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                     result["error"] = str(error)

@@ -35,6 +35,8 @@ pub mod pint;
 pub mod power;
 #[cfg(any(lpc55, kinetis))]
 pub mod pwm;
+#[cfg(feature = "mkl82z7")]
+pub mod rom;
 #[cfg(lpc55)]
 pub mod sct;
 #[cfg(any(lpc55, kinetis))]
@@ -43,6 +45,8 @@ pub mod spi;
 pub mod spis;
 #[cfg(lpc55)]
 pub mod usart;
+#[cfg(kinetis)]
+pub mod wdog;
 
 #[cfg(rt1xxx)]
 mod iomuxc;

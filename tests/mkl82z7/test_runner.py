@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import run
 
@@ -53,6 +53,7 @@ class SelectionTests(unittest.TestCase):
             ["--group", "link", "--probe", "1366:0101:123"],
             ["--probe", "1366:0101:123", "--peer-probe", "1366:0101:000123"],
             ["lptmr_time", "--probe", "1366:0101:123", "--time-driver", "tpm"],
+            ["--group", "serial", "--probe", "1366:0101:123"],
         ]:
             with (
                 self.subTest(args=args),
@@ -119,6 +120,91 @@ class ExecutionTests(unittest.TestCase):
         )
         self.assertLess(script.index("quit 1"), script.index('printf "HIL PASS\\n"'))
 
+    def test_probe_rs_server_resets_before_gdb_attaches(self):
+        args = argparse.Namespace(
+            probe="1366:0101:000123",
+            jlink="jlink",
+            probe_rs="probe-rs",
+            debug_server="probe-rs",
+            speed=1000,
+            port=2331,
+        )
+        argv, ready = run.gdb_server(args)
+        self.assertEqual(argv[:2], ["probe-rs", "gdb"])
+        self.assertIn("--reset-halt", argv)
+        self.assertIn("--connect-under-reset", argv)
+        self.assertIn(args.probe, argv)
+        self.assertIn("127.0.0.1:2331", argv)
+        self.assertEqual(ready, "Firing up GDB stub")
+        self.assertNotIn("monitor reset", run.gdb_commands(2331, reset=False))
+        args.debug_server = "jlink"
+        argv, ready = run.gdb_server(args)
+        self.assertEqual(argv[0], "jlink")
+        self.assertEqual(argv[argv.index("-USB") + 1], "123")
+        self.assertEqual(ready, "Waiting for GDB connection")
+
+    def test_rom_ping_requires_complete_packet_and_crc(self):
+        packet = bytes.fromhex("5a a7 00 02 01 50 00 00 aa ea")
+        self.assertTrue(run.valid_ping(packet))
+        self.assertFalse(run.valid_ping(packet[:-1]))
+        self.assertFalse(run.valid_ping(packet + b"\x00"))
+        for i in range(len(packet)):
+            corrupt = bytearray(packet)
+            corrupt[i] ^= 1
+            self.assertFalse(run.valid_ping(corrupt))
+
+    def serial_verdict(self, name, chunks, times):
+        uart = MagicMock()
+        uart.read.side_effect = chunks
+        module = MagicMock()
+        module.Serial.return_value.__enter__.return_value = uart
+        args = argparse.Namespace(
+            serial="/dev/tty-test",
+            probe="1366:0101:123",
+            probe_rs="probe-rs",
+            speed=1000,
+        )
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(sys.modules, {"serial": module}),
+            patch.object(run, "program") as program,
+            patch.object(run, "command") as command,
+            patch.object(run.time, "monotonic", side_effect=times),
+        ):
+            run.run_serial(args, name, Path("firmware"), 10, Path(folder) / name)
+            program.assert_called_once()
+            self.assertEqual(command.call_args.args[0][:2], ["probe-rs", "reset"])
+            self.assertEqual(uart.reset_input_buffer.call_count, 2)
+        return uart
+
+    def test_serial_completion_can_span_reads(self):
+        self.serial_verdict("watchdog", [b"WATCH", b"DOG OK\r\n"], [0, 0, 0])
+
+    def test_serial_rom_requires_live_entry_and_valid_response(self):
+        packet = bytes.fromhex("5a a7 00 02 01 50 00 00 aa ea")
+        uart = self.serial_verdict(
+            "rom_bootloader", [b"ROM entry\r\n", packet[:4], packet[4:]], [0, 0, 0, 0]
+        )
+        uart.write.assert_called_with(b"\x5a\xa6")
+        for data in [packet, b"ROM entry\r\n" + packet[:-1] + b"\x00"]:
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                self.serial_verdict("rom_bootloader", [data], [0, 0, 20])
+
+    def test_serial_watchdog_reset_requires_arming_and_bounded_delay(self):
+        self.serial_verdict(
+            "watchdog_reset",
+            [b"WDOG ARMED\r\n", b"WDOG RESET OK\r\n"],
+            [0, 0, 0, 0.5, 0.5],
+        )
+        with self.assertRaisesRegex(RuntimeError, "without arming"):
+            self.serial_verdict("watchdog_reset", [b"WDOG RESET OK\r\n"], [0, 0])
+        with self.assertRaisesRegex(RuntimeError, "unexpected watchdog reset delay"):
+            self.serial_verdict(
+                "watchdog_reset",
+                [b"WDOG ARMED\r\n", b"WDOG RESET OK\r\n"],
+                [0, 0, 0, 3, 3],
+            )
+
     def check_link_cleanup(self, error, exit_code, status, name="spi_link_master"):
         with tempfile.TemporaryDirectory() as folder:
             argv = [
@@ -133,7 +219,12 @@ class ExecutionTests(unittest.TestCase):
             ]
             artifacts = {
                 name: Path(name)
-                for name in ["park", "spi_link_master", "spi_link_dma", "spi_link_slave"]
+                for name in [
+                    "park",
+                    "spi_link_master",
+                    "spi_link_dma",
+                    "spi_link_slave",
+                ]
             }
             with (
                 patch.object(sys, "argv", argv),

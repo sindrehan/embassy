@@ -19,8 +19,14 @@ EXTERN(FLASH_CONFIG);
 
 SECTIONS
 {
+  .bootloader_config ORIGIN(FLASH) + 0x3C0 :
+  {
+    KEEP(*(.bootloader_config));
+  } > FLASH
   .flash_config ORIGIN(FLASH) + 0x400 :
   {
     KEEP(*(.flash_config));
   } > FLASH
 } INSERT AFTER .vector_table;
+
+ASSERT(SIZEOF(.bootloader_config) <= 64, "Bootloader configuration exceeds 64 bytes");

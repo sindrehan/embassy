@@ -2,16 +2,17 @@
 
 Regression tests for `embassy-nxp` on the MKL82Z128VLK7. Each test is a separate
 flash-linked image with assertions and a bounded host-side run. Successful tests
-log `Test OK` and reach `hil_test_passed`; a panic, fault, lost connection or
-timeout is a failure. The `park` and `spi_link_slave` binaries are fixtures, not
-standalone tests.
+log `Test OK` and reach `hil_test_passed`, except for the UART-reported tests
+described below. A panic, fault, lost connection or timeout is a failure.
+The `park` and `spi_link_slave` binaries are fixtures, not standalone tests.
 
 ## Run locally
 
 Install Rust's `thumbv6m-none-eabi` target, `uv`, `probe-rs` with MKL82 support,
-SEGGER's `JLinkGDBServerCLExe`, and `arm-none-eabi-gdb`. Put them on `PATH`.
+`arm-none-eabi-gdb`, and optionally SEGGER's `JLinkGDBServerCLExe`. Put them on `PATH`.
 The local runner requires Linux and a J-Link probe; it flashes with probe-rs and
-checks completion with GDB because VLPS can interrupt live RTT access.
+checks completion with GDB because VLPS can interrupt live RTT access. Select
+`--debug-server probe-rs` to use probe-rs's GDB server instead of SEGGER's server.
 
 ```sh
 probe-rs list
@@ -50,12 +51,39 @@ its wiring; there is no combined group because the fixtures are incompatible.
 | `loopback` | Jumper D11/PTC6 to D12/PTC7; remove other SPI wiring | GPIO waits/cancellation, SPI blocking/IRQ/DMA transfers |
 | `link` | Two boards wired below; no loopback jumper | IRQ and DMA masters, 260 exchanges each, in-place and unequal-length buffers, slave teardown/recreation and VLPS between frames |
 | `low-leakage` | No external wake signals; TPM driver only | LLS3 timeout wake and VLLS3 reset wake |
+| `serial` | UART on PTB16/PTB17; no other drivers on ROM UART pins | Watchdog refresh, timeout bounds, WAIT/VLPS policies, disable/lock, reset, and ROM entry from a running PLL application |
 
 The `low-leakage` test resets the core on VLLS exit. A debugger that cannot
 preserve the completion breakpoint across that reset cannot verify this test;
 a disconnect or timeout is not evidence of success.
 After low-leakage debug loss, reflashing may require a target power cycle or
 recovery with SEGGER's J-Link tools.
+
+### Detached UART tests
+
+The `serial` group requires `--serial` to select the UART connected to the same
+board as `--probe`. The onboard OpenSDA UART works on an unmodified devkit. An
+external adapter must use 3.3 V logic, adapter RX to PTB17, TX to PTB16, and common
+ground; disconnect competing UART drivers.
+
+```sh
+uv run tests/mkl82z7/run.py --group serial --probe VID:PID:SERIAL --serial /dev/ttyACM0
+uv run tests/mkl82z7/run.py watchdog --vlpr --speed 50 --probe VID:PID:SERIAL --serial /dev/ttyACM0
+```
+
+The runner flashes and resets the target, releases the probe, then listens at
+115200 baud. No manual debugger removal is needed for these functional tests.
+The watchdog's `--vlpr` variant uses a 250 kHz core and bus; select a low SWD
+speed when flashing or recovering from that test.
+The watchdog tests reject an attached debug session: debug power requests affect
+STOP entry and would invalidate the sleep-policy assertions. The reset test
+requires both an arming message and a subsequent watchdog-reset verdict within
+a bounded interval. This is a functional reset check, not a precision timing measurement.
+
+The ROM test enables only UART interfaces in the BCA. It requires the application's
+entry message followed by a complete ROM ping response with a valid CRC. It sends
+no erase or programming commands. The target remains in the ROM afterwards;
+use `--park` to restore the idle fixture.
 
 When a second board is wired in, pass `--peer-probe VID:PID:SERIAL`. The runner
 first flashes an idle, high-impedance fixture to that board. This permits the
@@ -96,10 +124,11 @@ uv run --python 3.11 python -m unittest discover -s tests/mkl82z7 -p test_runner
 ```
 
 The Embassy build metadata covers both time drivers and the VLPR variant. The
-binaries carry Teleprobe target metadata and use the usual `Test OK`/breakpoint
-completion convention. The default Cargo runner is Teleprobe for single-image
-tests with an appropriate fixture; use the Python runner for two-board sequencing
-and J-Link low-power tests. The KL82 is not in the HIL farm, so `ci.sh` builds but
+binaries carry Teleprobe target metadata. GDB-reported tests use the usual
+`Test OK`/breakpoint completion convention; serial tests require the Python runner.
+The default Cargo runner is Teleprobe for single-image tests with an appropriate
+fixture; use the Python runner for two-board sequencing and J-Link low-power tests.
+The KL82 is not in the HIL farm, so `ci.sh` builds but
 does not submit these artifacts for execution.
 
 User-oriented examples are in [examples/mkl82z7](../../examples/mkl82z7).
