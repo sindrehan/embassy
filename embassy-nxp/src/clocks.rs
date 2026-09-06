@@ -556,8 +556,7 @@ fn set_dividers(config: &ClockConfig) {
 /// FEI -> FBE -> PBE -> PEE, following the reference manual's mode transition rules and the
 /// MCUXpresso SDK's `CLOCK_BootToPeeMode`.
 fn enter_pee(external: ExternalClock, prdiv: u8, vdiv: u8) {
-    // Oscillator setup. RANGE: 0 = low (32 kHz), 1 = high (3 to 8 MHz), 2 = very high (8 to
-    // 32 MHz); the PAC marks 2 as reserved because the SVD lacks its description.
+    // RANGE: 0 = low (32 kHz), 1 = high (3 to 8 MHz), 2 = very high (8 to 32 MHz).
     let range = if external.frequency <= 39_063 {
         0
     } else if external.frequency <= 8_000_000 {
