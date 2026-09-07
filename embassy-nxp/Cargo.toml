@@ -48,13 +48,13 @@ embedded-hal-02 = { package = "embedded-hal", version = "0.2.6", features = ["un
 embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
 embedded-hal-async = { version = "1.0" }
 ## Chip dependencies
-nxp-pac = { version = "0.1.0", optional = true, git = "https://github.com/sindrehan/nxp-pac", rev = "9385591565a67d7cb5395be97260333a3353be1f" }
+nxp-pac = { version = "0.1.0", optional = true, git = "https://github.com/sindrehan/nxp-pac", rev = "ac6d9fe181eb8d40533000da7cb9bd2a10ba4ce9" }
 
 imxrt-rt = { version = "0.1.7", optional = true, features = ["device"] }
 
 [build-dependencies]
 cfg_aliases = "0.2.1"
-nxp-pac = { version = "0.1.0", git = "https://github.com/sindrehan/nxp-pac", rev = "9385591565a67d7cb5395be97260333a3353be1f", default-features = false, features = ["metadata"] }
+nxp-pac = { version = "0.1.0", git = "https://github.com/sindrehan/nxp-pac", rev = "ac6d9fe181eb8d40533000da7cb9bd2a10ba4ce9", default-features = false, features = ["metadata"] }
 proc-macro2 = "1.0.95"
 quote = "1.0.15"
 

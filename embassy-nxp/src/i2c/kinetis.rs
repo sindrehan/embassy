@@ -342,12 +342,14 @@ impl<'d> I2c<'d, Async> {
 
     /// Read into `buffer` from the device at `address`.
     pub async fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Error> {
-        self.transaction_inner_async(address, &mut [Operation::Read(buffer)]).await
+        self.transaction_inner_async(address, &mut [Operation::Read(buffer)])
+            .await
     }
 
     /// Write `bytes` to the device at `address`.
     pub async fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Error> {
-        self.transaction_inner_async(address, &mut [Operation::Write(bytes)]).await
+        self.transaction_inner_async(address, &mut [Operation::Write(bytes)])
+            .await
     }
 
     /// Write `bytes`, then read into `buffer` after a repeated start.
@@ -515,14 +517,12 @@ impl<'d, M: Mode> I2c<'d, M> {
     async fn transaction_inner_async(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
         let timeout = self.timeout();
         let _wake_guard = crate::power::wake_guard();
-        timeout.with_async(self.transaction_inner_impl(address, operations)).await
+        timeout
+            .with_async(self.transaction_inner_impl(address, operations))
+            .await
     }
 
-    async fn transaction_inner_blocking(
-        &mut self,
-        address: u8,
-        operations: &mut [Operation<'_>],
-    ) -> Result<(), Error> {
+    async fn transaction_inner_blocking(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
         let timeout = self.timeout();
         let _wake_guard = crate::power::wake_guard();
         timeout
